@@ -70,7 +70,7 @@ class TestPCAUtils(TestCase):
 
         output_dict = \
             train_pca_dask(dask_array=stacked_array, mask=None,
-                           clean_params=clean_params, use_fft=config_data['use_fft'],
+                           clean_params=clean_params,
                            rank=config_data['rank'], cluster_type=config_data['cluster_type'],
                            min_height=config_data['min_height'],
                            max_height=config_data['max_height'], client=client,
@@ -109,12 +109,12 @@ class TestPCAUtils(TestCase):
         with h5py.File(f'{pca_path}.h5', 'r') as f:
             pca_components = f['components'][()]
 
-        use_fft, clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
+        clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
 
         h5s, dicts, yamls = recursive_find_h5s(input_dir)
 
         apply_pca_local(pca_components=pca_components, h5s=h5s, yamls=yamls,
-                        use_fft=use_fft, clean_params=clean_params,
+                        clean_params=clean_params,
                         save_file=save_file, chunk_size=config_data['chunk_size'],
                         mask_params=mask_params, fps=config_data['fps'],
                         missing_data=missing_data)
@@ -136,14 +136,14 @@ class TestPCAUtils(TestCase):
         with h5py.File(f'{pca_path}.h5', 'r') as f:
             pca_components = f['components'][()]
 
-        use_fft, clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
+        clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
 
         h5s, dicts, yamls = recursive_find_h5s(input_dir)
 
         chunk_size = 100
         client = Client(processes=True)
 
-        apply_pca_dask(pca_components, h5s, yamls, use_fft, clean_params,
+        apply_pca_dask(pca_components, h5s, yamls, clean_params,
                        save_file, chunk_size, mask_params, missing_data,
                        client)
 
@@ -154,7 +154,7 @@ class TestPCAUtils(TestCase):
 
         missing_data = True
 
-        apply_pca_dask(pca_components, h5s, yamls, use_fft, clean_params,
+        apply_pca_dask(pca_components, h5s, yamls, clean_params,
                        save_file, chunk_size, mask_params, missing_data,
                        client)
 
@@ -189,7 +189,7 @@ class TestPCAUtils(TestCase):
         with h5py.File(f'{pca_path}.h5', 'r') as f:
             pca_components = f['components'][()]
 
-        use_fft, clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
+        clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
 
         missing_data = False
 
@@ -220,7 +220,7 @@ class TestPCAUtils(TestCase):
 
         missing_data = True
 
-        apply_pca_dask(pca_components, h5s, yamls, use_fft, clean_params,
+        apply_pca_dask(pca_components, h5s, yamls, clean_params,
                        missing_data_save_file, chunk_size, mask_params, missing_data,
                        client)
 

@@ -5,7 +5,7 @@ from unittest import TestCase
 from os.path import join, exists
 from click.testing import CliRunner
 from moseq2_pca.cli import train_pca, apply_pca, compute_changepoints
-
+from moseq2_pca.util import write_yaml
 
 def run_pca(data_dir, out_dir):
 
@@ -101,8 +101,7 @@ class TestCli(TestCase):
         config_data['pca_file'] = None
         config_data['pca_file_scores'] = None
 
-        with open(config, 'w') as f:
-            yaml.safe_dump(config_data, f)
+        write_yaml(config, config_data)
 
         os.rename('data/tmp_pca/pca_scores1.h5', 'data/tmp_pca/pca_scores.h5')
 
@@ -111,8 +110,7 @@ class TestCli(TestCase):
 
         pca_meta['missing_data'] = True
 
-        with open(pca_yaml, 'w') as f:
-            yaml.safe_dump(pca_meta, f)
+        write_yaml(pca_yaml, pca_meta)
 
         cc_params_local = ['-i', data_dir, '-o', out_dir, '--config-file', config,
                            '--pca-file-scores', 'data/tmp_pca/pca_scores.h5',

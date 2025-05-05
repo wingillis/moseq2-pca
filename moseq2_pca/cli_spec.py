@@ -117,10 +117,6 @@ PCA_TRAIN_OPTIONS = [
         {'default': 'ellipse', 'type': str, 'help': 'Tail filter shape'}
     ),
     (
-        ['--use-fft'],
-        {'is_flag': True, 'help': 'Use 2D fft'}
-    ),
-    (
         ['--train-on-subset'],
         {'default': 1, 'type': float, 'help': "The fraction of the total frames the PCA is trained on; default PCA is trained on all frames"}
     ),

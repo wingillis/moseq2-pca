@@ -5,7 +5,7 @@ import ruamel.yaml as yaml
 from unittest import TestCase
 from os.path import join, exists
 from moseq2_pca.gui import train_pca_command, apply_pca_command, compute_changepoints_command
-
+from moseq2_pca.util import write_yaml, read_yaml
 
 def _is_file(*args):
     return exists(join(*args))
@@ -18,14 +18,11 @@ class TestGUI(TestCase):
         output_dir = 'data/tmp_pca'
         output_file = 'pca'
 
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
+        config_data = read_yaml(config_file)
 
-            config_data['use_fft'] = True
-            config_data['missing_data'] = False
+        config_data['missing_data'] = False
 
-        with open(config_file, 'w') as f:
-            yaml.safe_dump(config_data, f)
+        write_yaml(config_file, config_data)
 
         # in case it asks for user input
         stdin = 'data/stdin.txt'
@@ -64,14 +61,11 @@ class TestGUI(TestCase):
         output_dir = 'data/tmp_pca'
         output_file = 'pca'
 
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
+        config_data = read_yaml(config_file)
 
-            config_data['use_fft'] = True
-            config_data['missing_data'] = False
+        config_data['missing_data'] = False
 
-        with open(config_file, 'w') as f:
-            yaml.safe_dump(config_data, f)
+        write_yaml(config_file, config_data)
 
         # in case it asks for user input
         stdin = 'data/stdin.txt'
@@ -95,15 +89,12 @@ class TestGUI(TestCase):
         if not exists(outpath):
             os.makedirs(outpath)
 
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
-            config_data['pca_file'] = join(outpath, 'pca.h5')
+        config_data = read_yaml(config_file)
+        config_data['pca_file'] = join(outpath, 'pca.h5')
 
-            config_data['use_fft'] = True
-            config_data['missing_data'] = False
+        config_data['missing_data'] = False
 
-        with open(config_file, 'w') as f:
-            yaml.safe_dump(config_data, f)
+        write_yaml(config_file, config_data)
 
         progress_paths = {
             'train_data_dir': data_dir,
@@ -130,15 +121,12 @@ class TestGUI(TestCase):
             'pca_dirname': outpath
         }
 
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
-            config_data['pca_file'] = join(outpath, 'pca.h5')
+        config_data = read_yaml(config_file)
+        config_data['pca_file'] = join(outpath, 'pca.h5')
 
-            config_data['use_fft'] = True
-            config_data['missing_data'] = False
+        config_data['missing_data'] = False
 
-        with open(config_file, 'w') as f:
-            yaml.safe_dump(config_data, f)
+        write_yaml(config_file, config_data)
 
         compute_changepoints_command(data_dir, progress_paths, output_file)
 

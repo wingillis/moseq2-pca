@@ -12,7 +12,7 @@ from pathlib import Path
 from tqdm.auto import tqdm
 import dask.array.linalg as lng
 from dask.distributed import as_completed, progress
-from moseq2_pca.helpers.parameters import MouseProcessingParams, SVDConfig
+from moseq2_pca.helpers.parameters import MouseProcessingParams, SVDConfig, DaskConfig
 from moseq2_pca.util import (
     clean_frames,
     insert_nans,
@@ -200,32 +200,23 @@ def copy_metadatas_to_scores(f: h5py.File, f_scores: h5py.File, uuid: str):
 
 
 def train_pca_dask(
-    dask_array,
+    dask_array: da.Array,
     mouse_proc_params: MouseProcessingParams,
     svd_config: SVDConfig,
-    use_fft,
-    rank,
-    cluster_type,
-    client,
-    mask=None,
-    iters=10,
-    recon_pcs=10,
+    dask_config: DaskConfig,
+    client: dask.distributed.Client,
+    mask: da.Array = None,
 ):
     """
     Train PCA using dask arrays.
 
     Args:
     dask_array (dask array): chunked frames to train PCA
-    clean_params (dict): dictionary containing filtering parameters
-    use_fft (bool): indicates whether to use 2d-FFT on images.
-    rank (int): Matrix rank to use
-    cluster_type (str): indicates which cluster to use.
+    mouse_proc_params (MouseProcessingParams): dictionary containing filtering parameters
+    svd_config (SVDConfig): configuration for SVD
+    dask_config (DaskConfig): configuration for Dask
     client (Dask.Client): client object to execute dask operations
     mask (dask array): dask array of masked data if missing_data parameter==True
-    iters (int): number of SVD iterations
-    recon_pcs (int): number of PCs to reconstruct. (if missing_data = True)
-    min_height (int): minimum mouse height from floor in (mm)
-    max_height (int): maximum mouse height from floor in (mm)
 
     Returns:
     output_dict (dict): dictionary containing PCA training results.
@@ -257,18 +248,10 @@ def train_pca_dask(
             clean_frames, dtype="float32", mouse_proc_params=mouse_proc_params
         )
 
-    # Optionally apply FFT to training data
-    if use_fft:
-        print("Using FFT...")
-        dask_array = dask_array.map_blocks(
-            lambda x: np.fft.fftshift(np.abs(np.fft.fft2(x)), axes=(1, 2)),
-            dtype="float32",
-        )
-
     # Reshape the data to 2D matrix
     dask_array = dask_array.reshape(len(dask_array), -1).astype("float32")
 
-    if cluster_type == "slurm":
+    if dask_config.cluster_type == "slurm":
         print("Cleaning frames...")
         dask_array = client.persist(dask_array)
         if mask is not None:
@@ -277,7 +260,7 @@ def train_pca_dask(
     # Compute mean to subtract from data later
     mean = dask_array.mean(axis=0)
 
-    if cluster_type == "slurm":
+    if dask_config.cluster_type == "slurm":
         mean = client.persist(mean)
 
     # todo compute reconstruction error
@@ -323,7 +306,6 @@ def apply_pca_local(
     pca_components,
     h5s,
     yamls,
-    use_fft,
     clean_params,
     save_file,
     chunk_size,
@@ -342,7 +324,6 @@ def apply_pca_local(
     pca_components (numpy.array): array of computed Principal Components
     h5s (list): list of h5 files
     yamls (list): list of yaml files
-    use_fft (bool): indicate whether to use 2D-FFT
     clean_params (dict): dictionary containing filtering options
     save_file (str): path to pca_scores filename to save
     chunk_size (int): size of chunks to process
@@ -386,10 +367,6 @@ def apply_pca_local(
                 # Filter the data
                 frames = clean_frames(frames, **clean_params)
 
-                # Apply FFT
-                if use_fft:
-                    frames = np.fft.fftshift(np.abs(np.fft.fft2(frames)), axes=(1, 2))
-
                 # Reshape the data to 2D matrix
                 frames = frames.reshape(-1, frames.shape[1] * frames.shape[2])
 
@@ -432,7 +409,6 @@ def apply_pca_dask(
     pca_components,
     h5s,
     yamls,
-    use_fft,
     clean_params,
     save_file,
     chunk_size,
@@ -451,7 +427,6 @@ def apply_pca_dask(
     pca_components (numpy.array): array of computed Principal Components
     h5s (list): list of h5 files
     yamls (list): list of yaml files
-    use_fft (bool): indicate whether to use 2D-FFT
     clean_params (dict): dictionary containing filtering options
     save_file (str): path to pca_scores filename to save
     chunk_size (int): size of chunks to process
@@ -510,12 +485,6 @@ def apply_pca_dask(
         else:
             frames = frames.map_blocks(clean_frames, dtype="float32", **clean_params)
 
-        # Apply FFT
-        if use_fft:
-            frames = frames.map_blocks(
-                lambda x: np.fft.fftshift(np.abs(np.fft.fft2(x)), axes=(1, 2)),
-                dtype="float32",
-            )
 
         # Reshape data to 2D and compute scores
         frames = frames.reshape(-1, frames.shape[1] * frames.shape[2])

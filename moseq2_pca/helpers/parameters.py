@@ -47,14 +47,6 @@ class MaskParams:
 
 
 @dataclass
-class ProcessingConfig:
-    """Configuration flags for processing modes"""
-
-    use_fft: bool = False
-    missing_data: bool = False
-
-
-@dataclass
 class DaskConfig:
     """Configuration for Dask cluster"""
 
@@ -80,7 +72,5 @@ class SVDConfig:
     iters: int = 10
     # recon_pcs (int): Number of PCs to reconstruct for missing data.
     recon_pcs: int = 10
-    # use_fft (bool): Whether to use FFT for SVD.
-    use_fft: bool = False
     # missing_data (bool): Whether to use missing data for SVD.
     missing_data: bool = False

@@ -14,7 +14,7 @@ import platform
 import subprocess
 import numpy as np
 import scipy.signal
-from glob import glob
+from pathlib import Path
 from copy import deepcopy
 from ruamel.yaml import YAML
 from tqdm.auto import tqdm
@@ -23,19 +23,14 @@ from dask.distributed import Client
 from toolz import dissoc, merge
 from dask_jobqueue import SLURMCluster
 from moseq2_pca.helpers.parameters import MouseProcessingParams, DaskConfig
-from os.path import join, exists, abspath, expanduser
 
 
-def recursive_find_h5s(root_dir=os.getcwd(),
-                       ext='.h5',
-                       yaml_string='{}.yaml'):
+def recursive_find_h5s(root_dir: Path = Path.cwd()):
     """
     Recursively find h5 files, along with yaml files with the same basename
 
     Args:
-    root_dir (str): path to base directory to begin recursive search in.
-    ext (str): extension to search for
-    yaml_string (str): string for filename formatting when saving data
+    root_dir (Path): path to base directory to begin recursive search in.
 
     Returns:
     h5s (list): list of found h5 files
@@ -43,10 +38,7 @@ def recursive_find_h5s(root_dir=os.getcwd(),
     yamls (list): list of found yaml files
     """
 
-    if not ext.startswith('.'):
-        ext = '.' + ext
-
-    def has_frames(f):
+    def has_frames(f: Path):
         try:
             with h5py.File(f, 'r') as h5f:
                 return 'frames' in h5f
@@ -54,10 +46,14 @@ def recursive_find_h5s(root_dir=os.getcwd(),
             warnings.warn(f'Error reading {f}, skipping...')
             return False
 
-    h5s = glob(join(abspath(root_dir), '**', f'*{ext}'), recursive=True)
-    h5s = filter(lambda f: exists(yaml_string.format(f.replace(ext, ''))), h5s)
+    # recursively find all h5 files
+    h5s = root_dir.rglob('*.h5')
+    # filter out h5 files that don't have a corresponding yaml file
+    h5s = list(filter(lambda f: f.with_suffix('.yaml').exists(), h5s))
+    # filter out h5 files that don't have frames
     h5s = list(filter(has_frames, h5s))
-    yamls = list(map(lambda f: yaml_string.format(f.replace(ext, '')), h5s))
+
+    yamls = [f.with_suffix('.yaml') for f in h5s]
     dicts = list(map(read_yaml, yamls))
 
     return h5s, dicts, yamls
@@ -219,7 +215,16 @@ def insert_nans(timestamps, data, fps=30):
     return filled_data, data_idx, filled_timestamps
 
 
-def read_yaml(yaml_file):
+def write_yaml(yaml_file: str | Path, data: dict):
+    """
+    Write dictionary to yaml file.
+    """
+    yaml = YAML(typ='safe')
+    with open(yaml_file, 'w') as f:
+        yaml.dump(data, f)
+
+
+def read_yaml(yaml_file: str | Path):
     """
     Read yaml file and return dictionary representation of file contents.
 
@@ -459,7 +464,7 @@ def initialize_dask(dask_config: DaskConfig, data_size: float = None):
                         memory_limit=mem_limit,
                         n_workers=nworkers,
                         dashboard_address=dask_config.dashboard_port,
-                        local_directory=dask_config.cache_path)
+                        local_directory=str(dask_config.cache_path))
         cluster = client.cluster
 
     elif dask_config.cluster_type == 'slurm':
@@ -470,7 +475,7 @@ def initialize_dask(dask_config: DaskConfig, data_size: float = None):
                                memory=dask_config.memory,
                                queue=dask_config.queue,
                                walltime=dask_config.wall_time,
-                               local_directory=dask_config.cache_path,
+                               local_directory=str(dask_config.cache_path),
                                scheduler_options={'dashboard_address': dask_config.dashboard_port})
         client = Client(cluster)
     else:
@@ -628,6 +633,4 @@ def combine_new_config(config_file, config_data):
     # ensure output_file and output_dir are not in config_data or reusing config for extraction will fail
     config_data = dissoc(config_data, 'output_dir', 'output_file')
 
-    yaml = YAML(typ='safe')
-    with open(config_file, 'w') as f:
-        yaml.safe_dump(config_data, f)
+    write_yaml(config_file, config_data)
