@@ -6,7 +6,6 @@ import click
 import logging
 import warnings
 import numpy as np
-import skimage.util
 import seaborn as sns
 from os.path import join
 from scipy.stats import mode
@@ -63,8 +62,15 @@ def display_components(components, cmap='gray', headless=False):
 
     # Get square image size
     im_size = int(np.sqrt(components.shape[1]))
-    plotv = components.reshape((-1, im_size, im_size))
-    plotv = skimage.util.montage(plotv)
+    components = components.reshape((-1, im_size, im_size))
+
+    ntiles_row = ntiles_col = int(np.ceil(np.sqrt(len(components))))
+    plotv = np.full((ntiles_row * im_size, ntiles_col * im_size), np.mean(components))
+    for i in range(ntiles_row):
+        row_slice = slice(i * im_size, (i + 1) * im_size)
+        for j in range(ntiles_col):
+            col_slice = slice(j * im_size, (j + 1) * im_size)
+            plotv[row_slice, col_slice] = components[i * ntiles_col + j]
 
     if headless:
         plt.switch_backend('agg')

@@ -8,7 +8,7 @@ import ruamel.yaml as yaml
 from unittest import TestCase
 from dask.distributed import Client, LocalCluster
 from moseq2_pca.util import gaussian_kernel1d, gauss_smooth, read_yaml, insert_nans, \
-    check_timestamps, recursive_find_h5s, clean_frames, select_strel, \
+    check_timestamps, recursive_find_h5s, clean_frames, \
     get_timestamp_path, get_metadata_path, initialize_dask, get_rps, get_changepoints, h5_to_dict
 
 
@@ -104,28 +104,6 @@ class TestUtils(TestCase):
                      tailfilter=tailfilter, tail_threshold=5)
 
         np.testing.assert_equal(np.any(np.not_equal(frames, test_output)), True)
-
-    def test_select_strel(self):
-        # original params: string='e', size=(10,10)
-        string0 = ''
-        string1 = 'e'
-        string2 = 'r'
-        size = (10, 10)
-        strel = None
-        mock_strel0 = None
-        mock_strel1 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, size)
-        mock_strel2 = cv2.getStructuringElement(cv2.MORPH_RECT, size)
-
-        test0 = select_strel(strel, size)
-        test01 = select_strel(string0, size)
-        test1 = select_strel(string1, size)
-        test2 = select_strel(string2, size)
-        test3 = select_strel('default', size)
-
-        assert test0 == test01 == mock_strel0
-        assert test1.all() == mock_strel1.all()
-        assert test2.all() == mock_strel2.all()
-        assert test3.all() == mock_strel1.all()
 
     def test_read_yaml(self):
         # original param: yaml_file

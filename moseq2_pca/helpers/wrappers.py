@@ -14,9 +14,11 @@ import dask.array as da
 import ruamel.yaml as yaml
 from pathlib import Path
 from tqdm.auto import tqdm
+from toolz import dissoc, keyfilter
 from moseq2_pca.viz import plot_pca_results, changepoint_dist
 from os.path import abspath, join, exists, splitext, basename, dirname
 from moseq2_pca.helpers.data import get_pca_paths, get_pca_yaml_data, load_pcs_for_cp
+from moseq2_pca.helpers.parameters import MouseProcessingParams, SVDConfig
 from moseq2_pca.pca.util import (
     apply_pca_dask,
     apply_pca_local,
@@ -25,7 +27,6 @@ from moseq2_pca.pca.util import (
 )
 from moseq2_pca.util import (
     recursive_find_h5s,
-    select_strel,
     initialize_dask,
     set_dask_config,
     close_dask,
@@ -86,6 +87,16 @@ def train_pca_wrapper(input_dir, config_data, output_dir, output_file):
     if config_data["missing_data"] and config_data["use_fft"]:
         raise NotImplementedError("FFT and missing data not implemented yet")
 
+    # gather parameters for mouse processing
+    mouse_param_dict = keyfilter(lambda k: k in MouseProcessingParams.__dataclass_fields__, config_data)
+    mouse_proc_params = MouseProcessingParams(**mouse_param_dict)
+    config_data = dissoc(config_data, *mouse_param_dict.keys())
+
+    # gather parameters for SVD
+    svd_param_dict = keyfilter(lambda k: k in SVDConfig.__dataclass_fields__, config_data)
+    svd_config = SVDConfig(**svd_param_dict)
+    config_data = dissoc(config_data, *svd_param_dict.keys())
+
     # Get training data
     output_dir, h5s, dicts, yamls = load_and_check_data(
         input_dir, output_dir, config_data
@@ -103,17 +114,6 @@ def train_pca_wrapper(input_dir, config_data, output_dir, output_file):
             ow = input()
             if ow.lower() != "y":
                 return config_data
-
-    # Hold all frame filtering parameters in a single dict
-    clean_params = {
-        "gaussfilter_space": config_data["gaussfilter_space"],
-        "gaussfilter_time": config_data["gaussfilter_time"],
-        "tailfilter": select_strel(
-            config_data["tailfilter_shape"], config_data["tailfilter_size"]
-        ),
-        "medfilter_time": config_data["medfilter_time"],
-        "medfilter_space": config_data["medfilter_space"],
-    }
 
     logging.basicConfig(filename=f"{output_dir}/train.log", level=logging.ERROR)
 
@@ -196,7 +196,8 @@ def train_pca_wrapper(input_dir, config_data, output_dir, output_file):
         output_dict = train_pca_dask(
             dask_array=stacked_array,
             mask=stacked_array_mask,
-            clean_params=clean_params,
+            mouse_proc_params=mouse_proc_params,
+            svd_config=svd_config,
             use_fft=config_data["use_fft"],
             rank=config_data["rank"],
             cluster_type=config_data["cluster_type"],

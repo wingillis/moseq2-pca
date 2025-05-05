@@ -5,7 +5,8 @@ Helper functions for reading and loading PCA data.
 import h5py
 import ruamel.yaml as yaml
 from os.path import join, exists, splitext
-from moseq2_pca.util import select_strel, read_yaml
+from moseq2_pca.util import read_yaml
+from moseq2_pca.helpers.parameters import DataProcessingParams, ChangepointParams, MaskParams, ProcessingConfig
 
 def get_pca_paths(config_data, output_dir):
     """
@@ -96,44 +97,43 @@ def get_pca_yaml_data(pca_yaml):
     pca_yaml (str): path to pca.yaml
 
     Returns:
-    use_fft (bool): indicates whether to use FFT
-    clean_params (dict): dict of image filtering parameters
-    mask_params (dict): dict of mask parameters)
-    missing_data (bool): indicates whether to use mask_params
+    DataProcessingParams: dataclass containing image filtering parameters
+    MaskParams: dataclass containing mask parameters
+    ProcessingConfig: dataclass containing processing configuration flags
     """
-
     if exists(pca_yaml):
         # Load pca metadata file
         pca_config = read_yaml(pca_yaml)
 
         use_fft = pca_config.get('use_fft', False)
-        # Check if PCA was trained with masked data
         missing_data = pca_config.get('missing_data', False)
         if use_fft:
             print('Will use FFT...')
         if missing_data:
             print('Detected missing data...')
 
-        # Get tail filter
-        tailfilter = select_strel(pca_config['tailfilter_shape'], tuple(pca_config['tailfilter_size']))
+        # Create dataclass instances
+        processing_config = ProcessingConfig(
+            use_fft=use_fft,
+            missing_data=missing_data
+        )
 
-        # Pack filtering paraneters
-        clean_params = {
-            'gaussfilter_space': pca_config['gaussfilter_space'],
-            'gaussfilter_time': pca_config['gaussfilter_time'],
-            'tailfilter': tailfilter,
-            'medfilter_time': pca_config['medfilter_time'],
-            'medfilter_space': pca_config['medfilter_space'],
-        }
+        data_params = DataProcessingParams(
+            min_height=pca_config['min_height'],
+            max_height=pca_config['max_height'],
+            gaussfilter_space=pca_config['gaussfilter_space'],
+            tailfilter_size=pca_config['tailfilter_size'],
+            medfilter_space=pca_config.get('medfilter_space'),
+            medfilter_time=pca_config.get('medfilter_time'),
+            gaussfilter_time=pca_config.get('gaussfilter_time', 0.0),
+            tailfilter_shape=pca_config.get('tailfilter_shape', 'ellipse')
+        )
 
-        # Get masking parameters
-        mask_params = {
-            'mask_height_threshold': pca_config['mask_height_threshold'],
-            'mask_threshold': pca_config['mask_threshold'],
-            'min_height': pca_config['min_height'],
-            'max_height': pca_config['max_height']
-        }
+        mask_params = MaskParams(
+            mask_height_threshold=pca_config.get('mask_height_threshold', 5.0),
+            mask_threshold=pca_config.get('mask_threshold', -16.0)
+        )
+
+        return data_params, mask_params, processing_config
     else:
         raise IOError(f'Could not find {pca_yaml}')
-
-    return use_fft, clean_params, mask_params, missing_data
