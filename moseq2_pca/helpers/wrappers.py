@@ -451,28 +451,3 @@ def compute_changepoints_wrapper(input_dir, config_data, output_dir, output_file
 
     return config_data
 
-
-def clip_scores_wrapper(pca_file, clip_samples, from_end=False):
-    """
-    Clip PCA scores from the beginning or end overwriting the original results.
-
-    Args:
-    pca_file (str): Path to PCA scores.
-    clip_samples (int): number of samples to clip from beginning or end
-    from_end (bool): if true clip from end rather than beginning
-    """
-
-    with h5py.File(pca_file, "r") as f:
-        store_dir = dirname(pca_file)
-        base_filename = splitext(basename(pca_file))[0]
-        new_filename = join(store_dir, f"{base_filename}_clip.h5")
-
-        with h5py.File(new_filename, "w") as f2:
-            f.copy("/metadata", f2)
-            for key in tqdm(f["/scores"].keys(), desc="Copying data"):
-                if from_end:
-                    f2[f"/scores/{key}"] = f[f"/scores/{key}"][:-clip_samples]
-                    f2[f"/scores_idx/{key}"] = f[f"/scores_idx/{key}"][:-clip_samples]
-                else:
-                    f2[f"/scores/{key}"] = f[f"/scores/{key}"][clip_samples:]
-                    f2[f"/scores_idx/{key}"] = f[f"/scores_idx/{key}"][clip_samples:]

@@ -4,7 +4,7 @@ import ruamel.yaml as yaml
 from unittest import TestCase
 from os.path import join, exists
 from click.testing import CliRunner
-from moseq2_pca.cli import clip_scores, train_pca, apply_pca, compute_changepoints
+from moseq2_pca.cli import train_pca, apply_pca, compute_changepoints
 
 
 def run_pca(data_dir, out_dir):
@@ -67,21 +67,6 @@ def run_apply(data_dir, out_dir):
 
 
 class TestCli(TestCase):
-
-    def test_clip_scores(self):
-
-        data_dir = 'data/'
-        h5path = join(data_dir, 'test_scores.h5')
-        clip_samples = '15'
-
-        clip_params = [h5path, clip_samples]
-
-        runner = CliRunner()
-        result = runner.invoke(clip_scores, clip_params)
-        outputfile = 'data/test_scores_clip.h5'
-
-        assert exists(outputfile), "Clipped scores file was not created"
-        assert (result.exit_code == 0), "CLI function did not complete successfully"
 
     def test_train_pca(self):
 
