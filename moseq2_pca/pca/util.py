@@ -328,14 +328,14 @@ def apply_pca_dask(
     Project input frame data by the transpose of the given PCs to obtain PCA Scores using distributed Dask cluster.
 
     Args:
-    pca_components (numpy.array): array of computed Principal Components
+    pca_components (numpy.ndarray): array of computed Principal Components
     h5s (list): list of h5 files
     yamls (list): list of yaml files
-    mouse_proc_params (dict): dictionary containing filtering options
-    save_file (str): path to pca_scores filename to save
-    chunk_size (int): size of chunks to process
+    mouse_proc_params (MouseProcessingParams): dictionary containing filtering options
+    save_file (Path): path to pca_scores filename to save
     mask_params (dict): dictionary of masking parameters (if missing data)
-    svd_config (dict): dictionary of SVD parameters
+    svd_config (SVDConfig): configuration for running SVD with Dask
+    client (dask Client): initialized Dask Client object
     fps (int): frames per second
     h5_path (str): path to frames within selected h5 file (default: '/frames')
     h5_mask_path (str): path to masked frames within selected h5 file (default: '/frames_mask')
@@ -409,7 +409,7 @@ def apply_pca_dask(
     # pin the batch size to the number of workers (assume each worker has enough RAM for one session)
     batch_size = len(client.scheduler_info()["workers"])
 
-    with h5py.File(f"{save_file}.h5", "w") as f_scores:
+    with h5py.File(save_file, "w") as f_scores:
 
         batch_count = 0
         batches = range(0, len(futures), batch_size)

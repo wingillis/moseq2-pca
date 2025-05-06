@@ -137,7 +137,7 @@ def train_pca(ctx_obj, input_dir, output_dir, output_file, **cli_args):
 @click.pass_obj
 def apply_pca(ctx_obj, input_dir, output_dir, output_file, **cli_args):
     # function writes output pc score path to config_data
-    config_data, _ = apply_pca_wrapper(input_dir, cli_args, output_dir, output_file)
+    config_data = apply_pca_wrapper(input_dir, cli_args, output_dir, output_file)
     # write config_data to config_file if there is one
     if ctx_obj.get('config_path'):
         # combine new config with old config to add output pc score path to config.yaml

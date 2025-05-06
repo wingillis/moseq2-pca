@@ -14,7 +14,7 @@ from pathlib import Path
 from copy import deepcopy
 from tqdm.auto import tqdm
 from moseq2_pca.viz import plot_pca_results, changepoint_dist
-from moseq2_pca.helpers.data import get_pca_paths, load_pcs_for_cp
+from moseq2_pca.helpers.data import load_pcs_for_cp
 from moseq2_pca.helpers.parameters import MouseProcessingParams, SVDConfig, DaskConfig, create_dataclass_from_dict, MaskParams
 from moseq2_pca.pca.util import (
     apply_pca_dask,
@@ -238,8 +238,8 @@ def apply_pca_wrapper(input_dir, config_data, output_dir, output_file):
 
     Returns:
     config_data (dict): updated config_data variable to write back in GUI API
-    success (bool): flag to indicate whether the PCA scores were computed successfully
     """
+    params = deepcopy(config_data)
 
     warnings.filterwarnings("ignore", category=RuntimeWarning)
     warnings.filterwarnings("ignore", category=UserWarning)
@@ -255,26 +255,29 @@ def apply_pca_wrapper(input_dir, config_data, output_dir, output_file):
     )
 
     # Set path to PCA Scores file
-    save_file = output_dir / output_file
+    save_file = (output_dir / output_file).with_suffix('.h5')
 
     # Handling pre-existing PCA file
     # no intended pca overwrite
     if not can_overwrite(config_data, save_file):
-        return config_data, False
+        return config_data
 
     # Get path to trained PCA file to load PCs from
-    config_data, pca_file, pca_file_scores = get_pca_paths(config_data, output_dir)
+    pca_file = config_data.get("pca_file")
+    if pca_file is None or not Path(pca_file).exists():
+        pca_file = output_dir / 'pca.h5'
+    else:
+        pca_file = Path(pca_file)
 
     print("Loading PCs from", pca_file)
-    with h5py.File(config_data["pca_file"], "r") as f:
+    with h5py.File(pca_file, "r") as f:
         pca_components = f[config_data["pca_path"]][()]
 
     # Get the yaml for pca, check parameters
-    pca_yaml = Path(pca_file).with_suffix('.yaml')
-
-    # Get filtering parameters and optional PCA reconstruction parameters (if missing_data == True)
+    pca_yaml = pca_file.with_suffix('.yaml')
 
     if pca_yaml.exists():
+        click.echo(f"Using parameters from training step: {pca_yaml}")
         # Load pca metadata file
         pca_config = read_yaml(pca_yaml)
         # Create dataclass instances
@@ -304,16 +307,16 @@ def apply_pca_wrapper(input_dir, config_data, output_dir, output_file):
             h5_path=config_data["h5_path"],
             h5_mask_path=config_data["h5_mask_path"],
         )
-    except Exception as e:
+    except Exception:
         # Clearing all data from Dask client in case of interrupted PCA
         traceback.print_exc()
         click.echo("Operation interrupted. Closing Dask Client.")
     finally:
         # After Success or failure: Shutting down Dask client and clearing any residual data
-        close_dask(client, cluster, config_data["timeout"])
+        close_dask(client, cluster, dask_config.timeout)
 
-    config_data["pca_file_scores"] = str(save_file.with_suffix('.h5'))
-    return config_data, True
+    params["pca_file_scores"] = str(save_file)
+    return params
 
 
 def compute_changepoints_wrapper(input_dir, config_data, output_dir, output_file):
@@ -344,7 +347,17 @@ def compute_changepoints_wrapper(input_dir, config_data, output_dir, output_file
     save_file = (Path(output_dir) / output_file).with_suffix('.h5')
 
     # Get paths to PCA, PCA Scores file
-    config_data, pca_file, pca_file_scores = get_pca_paths(config_data, output_dir)
+    pca_scores_file = config_data.get("pca_file_scores")
+    if pca_scores_file is None or not Path(pca_scores_file).exists():
+        pca_scores_file = save_file.with_name("pca_scores.h5")
+    else:
+        pca_scores_file = Path(pca_scores_file)
+
+    pca_file = config_data.get("pca_file")
+    if pca_file is None or not Path(pca_file).exists():
+        pca_file = output_dir / 'pca.h5'
+    else:
+        pca_file = Path(pca_file)
 
     # Load Principal components, set up changepoint parameter dict, and optionally load reconstructed PCs.
     pca_components, changepoint_params, missing_data, mask_params = load_pcs_for_cp(
@@ -358,7 +371,7 @@ def compute_changepoints_wrapper(input_dir, config_data, output_dir, output_file
     try:
         get_changepoints_dask(
             pca_components=pca_components,
-            pca_scores=pca_file_scores,
+            pca_scores=pca_scores_file,
             h5s=h5s,
             yamls=yamls,
             changepoint_params=changepoint_params,
@@ -377,7 +390,7 @@ def compute_changepoints_wrapper(input_dir, config_data, output_dir, output_file
         click.echo("Operation interrupted. Closing Dask Client.")
     finally:
         # After Success: Shutting down Dask client and clearing any residual data
-        close_dask(client, cluster, config_data["timeout"])
+        close_dask(client, cluster, dask_config.timeout)
 
     # Read Changepoints from saved file
     with h5py.File(save_file, "r") as f:
