@@ -4,6 +4,8 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Literal
 from pathlib import Path
+from toolz import dissoc, keyfilter
+
 
 @dataclass
 class MouseProcessingParams:
@@ -62,6 +64,7 @@ class DaskConfig:
     cache_path: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "moseq2_pca")
     dashboard_port: str = "8787"
 
+
 @dataclass
 class SVDConfig:
     """Configuration for SVD"""
@@ -74,3 +77,28 @@ class SVDConfig:
     recon_pcs: int = 10
     # missing_data (bool): Whether to use missing data for SVD.
     missing_data: bool = False
+
+    chunk_size: int = 4000
+
+    # set to True if you want to use memory efficient SVD when data is larger than available memory
+    # generally keep False
+    memory_efficient: bool = False
+
+    def __post_init__(self):
+        if self.missing_data:
+            print('Detected missing data')
+
+
+def create_dataclass_from_dict(dataclass_type, data_dict):
+    """
+    Create a dataclass from a dictionary. Remove any keys that are not in the dataclass.
+    Return the dataclass and filtered dictionary.
+    """
+    # get the fields of the dataclass
+    fields = dataclass_type.__dataclass_fields__
+    # filter the dictionary to only include the fields of the dataclass
+    dataclass_out = dataclass_type(**keyfilter(lambda k: k in fields, data_dict))
+    # filter the dictionary to only include the fields of the dataclass
+    filtered_dict = dissoc(data_dict, *fields)
+
+    return dataclass_out, filtered_dict

@@ -72,7 +72,12 @@ def compute_svd(
 
     if not svd_config.missing_data:
         # Compute PCs
-        _, s, v = lng.svd_compressed(dask_array - mean, svd_config.rank, 0, compute=True)
+        _, s, v = lng.svd_compressed(
+            dask_array - mean,
+            k=svd_config.rank,
+            n_power_iter=0,
+            compute=svd_config.memory_efficient,
+        )
     else:
         dask_array, mean, s, v = compute_iterative_svd(
             dask_array=dask_array,
@@ -112,11 +117,19 @@ def compute_iterative_svd(dask_array, mean, mask, svd_config, min_height, max_he
     s (numpy.array): Final computed singular values
     v (numpy.ndarray): Final computed principal components
     """
-    for iter in tqdm(range(svd_config.iters), total=svd_config.iters, desc="Computing Iterative PCA"):
-        u, s, v = lng.svd_compressed(dask_array - mean, svd_config.rank, 0, compute=True)
+    for iter in tqdm(
+        range(svd_config.iters), total=svd_config.iters, desc="Computing Iterative PCA"
+    ):
+        u, s, v = lng.svd_compressed(
+            dask_array - mean,
+            k=svd_config.rank,
+            n_power_iter=0,
+            compute=svd_config.memory_efficient,
+        )
         if iter < svd_config.iters - 1:
             recon = (
-                u[:, :svd_config.recon_pcs].dot(da.diag(s[:svd_config.recon_pcs]).dot(v[:svd_config.recon_pcs, :]))
+                u[:, : svd_config.recon_pcs]
+                @ (da.diag(s[: svd_config.recon_pcs]) @ v[: svd_config.recon_pcs, :])
                 + mean
             )
             recon = da.where(
@@ -124,9 +137,7 @@ def compute_iterative_svd(dask_array, mean, mask, svd_config, min_height, max_he
                 0,
                 recon,
             )
-            dask_array = da.map_blocks(
-                mask_data, dask_array, mask, recon, dtype=dask_array.dtype
-            )
+            dask_array = da.map_blocks(mask_data, dask_array, mask, recon, dtype=dask_array.dtype)
             mean = dask_array.mean(axis=0)
 
     return dask_array, mean, s, v
@@ -252,7 +263,7 @@ def train_pca_dask(
     dask_array = dask_array.reshape(len(dask_array), -1).astype("float32")
 
     if dask_config.cluster_type == "slurm":
-        print("Cleaning frames...")
+        click.echo("Cleaning frames...")
         dask_array = client.persist(dask_array)
         if mask is not None:
             mask = client.persist(mask)
@@ -263,9 +274,7 @@ def train_pca_dask(
     if dask_config.cluster_type == "slurm":
         mean = client.persist(mean)
 
-    # todo compute reconstruction error
-
-    print("\nComputing SVD...")
+    click.echo("\nComputing SVD...")
 
     # Train the PCA
     s, v, mean, total_var = compute_svd(
@@ -278,12 +287,12 @@ def train_pca_dask(
         client=client,
     )
 
-    print("\nCalculation complete...")
+    click.echo("\nCalculation complete")
 
     # correct the sign of the singular vectors
-    tmp = np.argmax(np.abs(v), axis=1)
-    correction = np.sign(v[np.arange(len(v)), tmp])
-    v *= correction[:, None]
+    index = np.argmax(np.abs(v), axis=1)
+    correction = np.sign(v[np.arange(len(v)), index])
+    v = v * correction[:, None]
 
     # Get explained variances
     explained_variance, explained_variance_ratio = compute_explained_variance(
@@ -302,123 +311,18 @@ def train_pca_dask(
     return output_dict
 
 
-def apply_pca_local(
-    pca_components,
-    h5s,
-    yamls,
-    clean_params,
-    save_file,
-    chunk_size,
-    mask_params,
-    missing_data,
-    fps=30,
-    h5_path="/frames",
-    h5_mask_path="/frames_mask",
-    verbose=False,
-):
-    """
-    Project the input frame data by the transpose of the given PCs to obtain PCA Scores
-    using local cluster/platform.
-
-    Args:
-    pca_components (numpy.array): array of computed Principal Components
-    h5s (list): list of h5 files
-    yamls (list): list of yaml files
-    clean_params (dict): dictionary containing filtering options
-    save_file (str): path to pca_scores filename to save
-    chunk_size (int): size of chunks to process
-    mask_params (dict): dictionary of masking parameters (if missing data)
-    missing_data (bool): indicates whether to use mask arrays.
-    fps (int): frames per second
-    h5_path (str): path to frames within selected h5 file (default: '/frames')
-    h5_mask_path (str): path to masked frames within selected h5 file (default: '/frames_mask')
-    verbose (bool): print session names as they are being loaded.
-
-    Returns:
-    """
-
-    with h5py.File(f"{save_file}.h5", "w") as f_scores:
-        for h5, yml in tqdm(zip(h5s, yamls), total=len(h5s), desc="Computing scores"):
-            if verbose:
-                print("Loading", h5)
-
-            with h5py.File(h5, "r") as f:
-                # associate UUID with frames
-                try:
-                    uuid = f["metadata/uuid"][()]
-                    if isinstance(uuid, bytes):
-                        uuid = uuid.decode()
-                except Exception:
-                    uuid = read_yaml(yml)["uuid"]
-
-                # Load frames
-                frames = f[h5_path][()].astype("float32")
-
-                if missing_data:
-                    # Load masked frames
-                    mask = f[h5_mask_path][()]
-                    mask = np.logical_and(
-                        mask < mask_params["mask_threshold"],
-                        frames > mask_params["mask_height_threshold"],
-                    )
-                    frames[mask] = 0
-                    mask = mask.reshape(-1, frames.shape[1] * frames.shape[2])
-
-                # Filter the data
-                frames = clean_frames(frames, **clean_params)
-
-                # Reshape the data to 2D matrix
-                frames = frames.reshape(-1, frames.shape[1] * frames.shape[2])
-
-                timestamps = get_timestamps(f, fps)
-                copy_metadatas_to_scores(f, f_scores, uuid)
-
-            # Compute scores
-            scores = frames.dot(pca_components.T)
-
-            # if we have missing data, simply fill in, repeat the score calculation,
-            # then move on
-            if missing_data:
-                # Compute reconstructed PCs
-                recon = scores.dot(pca_components)
-                recon[recon < mask_params["min_height"]] = 0
-                recon[recon > mask_params["max_height"]] = 0
-                frames[mask] = recon[mask]
-                scores = frames.dot(pca_components.T)
-
-            # Insert NaNs into scores array
-            scores, score_idx, _ = insert_nans(
-                data=scores,
-                timestamps=timestamps,
-                fps=np.round(1 / np.mean(np.diff(timestamps))).astype("int"),
-            )
-
-            # Write scores
-            f_scores.create_dataset(
-                f"scores/{uuid}", data=scores, dtype="float32", compression="gzip"
-            )
-            f_scores.create_dataset(
-                f"scores_idx/{uuid}",
-                data=score_idx,
-                dtype="float32",
-                compression="gzip",
-            )
-
-
 def apply_pca_dask(
     pca_components,
     h5s,
     yamls,
-    clean_params,
-    save_file,
-    chunk_size,
-    mask_params,
-    missing_data,
-    client,
-    fps=30,
-    h5_path="/frames",
-    h5_mask_path="/frames_mask",
-    verbose=False,
+    mouse_proc_params: MouseProcessingParams,
+    save_file: Path,
+    mask_params: dict,
+    svd_config: SVDConfig,
+    client: dask.distributed.Client,
+    fps: int = 30,
+    h5_path: str = "/frames",
+    h5_mask_path: str = "/frames_mask",
 ):
     """
     Project input frame data by the transpose of the given PCs to obtain PCA Scores using distributed Dask cluster.
@@ -427,15 +331,14 @@ def apply_pca_dask(
     pca_components (numpy.array): array of computed Principal Components
     h5s (list): list of h5 files
     yamls (list): list of yaml files
-    clean_params (dict): dictionary containing filtering options
+    mouse_proc_params (dict): dictionary containing filtering options
     save_file (str): path to pca_scores filename to save
     chunk_size (int): size of chunks to process
     mask_params (dict): dictionary of masking parameters (if missing data)
-    missing_data (bool): indicates whether to use mask arrays.
+    svd_config (dict): dictionary of SVD parameters
     fps (int): frames per second
     h5_path (str): path to frames within selected h5 file (default: '/frames')
     h5_mask_path (str): path to masked frames within selected h5 file (default: '/frames_mask')
-    verbose (bool): print session names as they are being loaded.
 
     Returns:
     """
@@ -445,8 +348,6 @@ def apply_pca_dask(
     h5_file_pointers = []
 
     for h5, yml in tqdm(zip(h5s, yamls), total=len(h5s), desc="Loading Data"):
-        if verbose:
-            print("Loading", h5)
 
         h5p = h5py.File(h5, mode="r")
 
@@ -459,45 +360,47 @@ def apply_pca_dask(
             uuid = read_yaml(yml)["uuid"]
 
         # Load data
-        frames = da.from_array(h5p[h5_path], chunks=chunk_size).astype("float32")
+        frames = da.from_array(h5p[h5_path], chunks=svd_config.chunk_size).astype("float32")
 
-        if missing_data:
+        if svd_config.missing_data:
             # Load masked data
             mask = da.from_array(h5p[h5_mask_path], chunks=frames.chunks)
             mask = da.logical_and(
                 mask < mask_params["mask_threshold"],
                 frames > mask_params["mask_height_threshold"],
             )
-            frames[mask] = 0
+            frames = da.where(mask, 0, frames)
             mask = mask.reshape(-1, frames.shape[1] * frames.shape[2])
 
         # Apply filters
-        if clean_params["gaussfilter_time"] > 0 or np.any(
-            np.array(clean_params["medfilter_time"]) > 0
+        if mouse_proc_params.gaussfilter_time > 0 or np.any(
+            np.array(mouse_proc_params.medfilter_time) > 0
         ):
             frames = frames.map_overlap(
                 clean_frames,
                 depth=(20, 0, 0),
                 boundary="reflect",
                 dtype="float32",
-                **clean_params,
+                mouse_proc_params=mouse_proc_params,
             )
         else:
-            frames = frames.map_blocks(clean_frames, dtype="float32", **clean_params)
-
+            frames = frames.map_blocks(clean_frames, dtype="float32", mouse_proc_params=mouse_proc_params)
 
         # Reshape data to 2D and compute scores
         frames = frames.reshape(-1, frames.shape[1] * frames.shape[2])
-        scores = frames.dot(pca_components.T)
+        scores = frames @ pca_components.T
 
-        if missing_data:
+        if svd_config.missing_data:
             # Reconstruct missing scores data
-            recon = scores.dot(pca_components)
-            recon[recon < mask_params["min_height"]] = 0
-            recon[recon > mask_params["max_height"]] = 0
+            recon = scores @ pca_components
+            recon = da.where(
+                da.logical_or(recon < mouse_proc_params.min_height, recon > mouse_proc_params.max_height),
+                0,
+                recon,
+            )
             frames = da.map_blocks(mask_data, frames, mask, recon, dtype=frames.dtype)
             # Compute reconstructed scores
-            scores = frames.dot(pca_components.T)
+            scores = frames @ pca_components.T
 
         futures.append(scores)
         uuids.append(uuid)
@@ -567,7 +470,6 @@ def get_changepoints_dask(
     progress_bar=False,
     h5_path="/frames",
     h5_mask_path="/frames_mask",
-    verbose=False,
     n_rps=300,
 ):
     """
@@ -588,7 +490,6 @@ def get_changepoints_dask(
     progress_bar (bool): display progress bar
     h5_path (str): path to frames within selected h5 file (default: '/frames')
     h5_mask_path (str): path to masked frames within selected h5 file (default: '/frames_mask')
-    verbose (bool): print session names as they are being loaded.
 
     Returns:
     """
@@ -603,8 +504,6 @@ def get_changepoints_dask(
         desc="Setting up calculation",
         total=len(h5s),
     ):
-        if verbose:
-            print("Loading", h5)
 
         h5p = h5py.File(h5, "r")
 

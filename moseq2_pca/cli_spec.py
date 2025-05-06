@@ -11,10 +11,6 @@ COMMON_PCA_OPTIONS = [
         {'type': click.Path(), 'default': Path.cwd() / '_pca', 'help': 'Directory to store PCA results'}
     ),
     (
-        ['--config-file'],
-        {'type': click.Path(), 'help': "Path to configuration file"}
-    ),
-    (
         ['--h5-path'],
         {'default': '/frames', 'type': str, 'help': 'Path to data in h5 files'}
     ),
@@ -64,6 +60,14 @@ DASK_PARAMETERS = [
     (
         ['--timeout'],
         {'default': 5, 'type': float, 'help': "Time to wait for workers to initialize before proceeding (minutes)"}
+    ),
+    (
+        ["--cluster-type"],
+        {'default': "local", 'type': click.Choice(["local", "slurm"]), 'help': "Allows user to use a SLURM cluster if available by setting to 'slurm'"}
+    ),
+    (
+        ["--memory-efficient"],
+        {'is_flag': True, 'help': "Use memory efficient SVD when data is much larger than available memory. Generally keep False."}
     )
 ]
 

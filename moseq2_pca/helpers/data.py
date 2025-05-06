@@ -5,7 +5,7 @@ Helper functions for reading and loading PCA data.
 import h5py
 from pathlib import Path
 from moseq2_pca.util import read_yaml
-from moseq2_pca.helpers.parameters import DataProcessingParams, MaskParams
+from moseq2_pca.helpers.parameters import MouseProcessingParams, MaskParams, SVDConfig, create_dataclass_from_dict
 
 def get_pca_paths(config_data, output_dir):
     """
@@ -87,44 +87,3 @@ def load_pcs_for_cp(pca_file, config_data):
     }
 
     return pca_components, changepoint_params, missing_data, mask_params
-
-def get_pca_yaml_data(pca_yaml):
-    """
-    Reads PCA yaml file and returns enclosed metadata.
-
-    Args:
-    pca_yaml (str | Path): path to pca.yaml
-
-    Returns:
-    DataProcessingParams: dataclass containing image filtering parameters
-    MaskParams: dataclass containing mask parameters
-    """
-    pca_yaml = Path(pca_yaml)
-    if pca_yaml.exists():
-        # Load pca metadata file
-        pca_config = read_yaml(pca_yaml)
-
-        missing_data = pca_config.get('missing_data', False)
-        if missing_data:
-            print('Detected missing data...')
-
-        # Create dataclass instances
-        data_params = DataProcessingParams(
-            min_height=pca_config['min_height'],
-            max_height=pca_config['max_height'],
-            gaussfilter_space=pca_config['gaussfilter_space'],
-            tailfilter_size=pca_config['tailfilter_size'],
-            medfilter_space=pca_config.get('medfilter_space'),
-            medfilter_time=pca_config.get('medfilter_time'),
-            gaussfilter_time=pca_config.get('gaussfilter_time', 0.0),
-            tailfilter_shape=pca_config.get('tailfilter_shape', 'ellipse')
-        )
-
-        mask_params = MaskParams(
-            mask_height_threshold=pca_config.get('mask_height_threshold', 5.0),
-            mask_threshold=pca_config.get('mask_threshold', -16.0)
-        )
-
-        return data_params, mask_params
-    else:
-        raise IOError(f'Could not find {pca_yaml}')

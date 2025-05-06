@@ -190,11 +190,8 @@ def insert_nans(timestamps, data, fps=30):
     filled_data = deepcopy(data)
     filled_timestamps = deepcopy(timestamps)
 
-    if filled_data.ndim == 1:
-        isvec = True
+    if isvec := (filled_data.ndim == 1):
         filled_data = filled_data[:, None]
-    else:
-        isvec = False
 
     _, nfeatures = filled_data.shape
 
@@ -215,13 +212,20 @@ def insert_nans(timestamps, data, fps=30):
     return filled_data, data_idx, filled_timestamps
 
 
+def clean_paths(data: dict):
+    """
+    Convert paths to strings in a dictionary.
+    """
+    return {k: str(v) if isinstance(v, Path) else v for k, v in data.items()}
+
+
 def write_yaml(yaml_file: str | Path, data: dict):
     """
     Write dictionary to yaml file.
     """
     yaml = YAML(typ='safe')
     with open(yaml_file, 'w') as f:
-        yaml.dump(data, f)
+        yaml.dump(clean_paths(data), f)
 
 
 def read_yaml(yaml_file: str | Path):
@@ -346,13 +350,16 @@ def h5_to_dict(h5file: str | h5py.File, path: str) -> dict:
     return ans
 
 
-def set_dask_config(memory: dict = {'target': 0.85, 'spill': False, 'pause': False, 'terminate': 0.95}):
+def set_dask_config(memory: dict = None):
     """
     Set initial dask configuration parameters
 
     Args:
     memory (dict): dictionary containing default dask configuration variables to ensure safe amount of resource usage.
     """
+
+    if memory is None:
+        memory = {'target': 0.85, 'spill': False, 'pause': False, 'terminate': 0.95}
 
     memory = {f'distributed.worker.memory.{k}': v for k, v in memory.items()}
     dask.config.set(memory)
@@ -455,8 +462,10 @@ def initialize_dask(dask_config: DaskConfig, data_size: float = None):
     """
 
     click.echo(f'Access dask dashboard at http://localhost:{dask_config.dashboard_port}')
+    # dynamically change the set_dask_config memory setting
+    if dask_config.cluster_type == "local":
+        set_dask_config(memory={"target": 0.85, "spill": True, "pause": False, "terminate": False})
 
-    if dask_config.cluster_type == 'local':
         nworkers, mem_limit = calculate_worker_resources(dask_config, data_size)
 
         client = Client(processes=dask_config.local_processes,
@@ -468,6 +477,7 @@ def initialize_dask(dask_config: DaskConfig, data_size: float = None):
         cluster = client.cluster
 
     elif dask_config.cluster_type == 'slurm':
+        set_dask_config()
 
         cluster = SLURMCluster(processes=dask_config.processes,
                                n_workers=dask_config.nworkers,
@@ -490,7 +500,6 @@ def initialize_dask(dask_config: DaskConfig, data_size: float = None):
             hostname = platform.node()
             click.echo(f'Web UI served at {ip}:{port} (if port forwarding use internal IP not localhost)')
             click.echo(f'Tunnel command:\n ssh -NL {port}:{ip}:{port} {hostname}')
-            click.echo(f'Tunnel command (gcloud):\n gcloud compute ssh {hostname} -- -NL {port}:{ip}:{port}')
 
     if dask_config.cluster_type == 'slurm':
 
@@ -500,15 +509,14 @@ def initialize_dask(dask_config: DaskConfig, data_size: float = None):
             warnings.simplefilter('ignore')
             pbar = tqdm(total=nworkers, desc="Intializing workers")
 
-            elapsed_time = (time.time() - start_time) / 60
-
-            while active_workers < nworkers and elapsed_time < dask_config.timeout:
-                tmp = len(client.scheduler_info()['workers'])
+            while (
+                active_workers < nworkers and (time.time() - start_time) / 60 < dask_config.timeout
+            ):
+                tmp = len(client.scheduler_info()["workers"])
                 if tmp - active_workers > 0:
                     pbar.update(tmp - active_workers)
                 active_workers = tmp
                 time.sleep(1)
-                elapsed_time = (time.time() - start_time) / 60
 
             pbar.close()
 
@@ -629,8 +637,8 @@ def combine_new_config(config_file, config_data):
     # open the config file
     temp_config = read_yaml(config_file)
     # combining config data with the existing config file
-    config_data = merge(temp_config, config_data)
+    temp_config['pca'] = merge(temp_config['pca'], config_data)
     # ensure output_file and output_dir are not in config_data or reusing config for extraction will fail
-    config_data = dissoc(config_data, 'output_dir', 'output_file')
+    temp_config['pca'] = dissoc(temp_config['pca'], 'output_dir', 'output_file')
 
-    write_yaml(config_file, config_data)
+    write_yaml(config_file, temp_config)

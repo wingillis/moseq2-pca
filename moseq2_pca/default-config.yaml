@@ -1,0 +1,59 @@
+pca:
+  # Common setup parameters
+  input_dir: ./_aggregate_results
+  output_dir: ./_pca
+  h5_path: /frames
+  h5_mask_path: /frames_mask
+  chunk_size: 4000
+  camera_type: k2
+  overwrite_pca_train: false
+  overwrite_pca_apply: false
+  pca_file: null
+  pca_file_component: null
+  pca_file_score: null
+  pca_path: /components
+  fps: 30
+
+  # common data parameters
+  min_height: 10
+  max_height: 120
+  missing_data: false
+  missing_data_iters: 10
+  mask_threshold: -16
+  mask_height_threshold: 5
+
+  # image processing parameters
+  gaussfilter_space: [1.5, 1]
+  gaussfilter_time: 0
+  medfilter_space: [0]
+  medfilter_time: [0]
+  tailfilter_size: [9, 9]
+  tailfilter_shape: ellipse
+  train_on_subset: 1
+  recon_pcs: 10
+  rank: 25
+
+  # PCA application parameters
+  fill_gaps: true
+  detrend_window: 0
+
+  # Changepoint parameters
+  neighbors: 1
+  threshold: 0.5
+  klags: 6
+  sigma: 3.5
+  dims: 150
+
+  # Dask parameters
+  cluster_type: local
+  dask_cache_path: ./_pca
+  dask_port: '8787'
+  cores: 1
+  processes: 1
+  nworkers: 1
+  queue: debug
+  memory: 15GB
+  wall_time: 06:00:00
+  timeout: 5
+  memory_efficient: false
+  local_process: false
