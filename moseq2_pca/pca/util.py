@@ -12,7 +12,12 @@ from pathlib import Path
 from tqdm.auto import tqdm
 import dask.array.linalg as lng
 from dask.distributed import as_completed, progress
-from moseq2_pca.helpers.parameters import MouseProcessingParams, SVDConfig, DaskConfig
+from moseq2_pca.helpers.parameters import (
+    MouseProcessingParams,
+    SVDConfig,
+    DaskConfig,
+    ChangepointParams,
+)
 from moseq2_pca.util import (
     clean_frames,
     insert_nans,
@@ -456,7 +461,7 @@ def apply_pca_dask(
 
 
 def get_changepoints_dask(
-    changepoint_params,
+    changepoint_params: ChangepointParams,
     pca_components,
     h5s,
     yamls,
@@ -476,7 +481,7 @@ def get_changepoints_dask(
     Compute model-free changepoint block durations using random projections.
 
     Args:
-    changepoint_params (dict): dict of changepoint parameters
+    changepoint_params (ChangepointParams): dict of changepoint parameters
     pca_components (numpy.array): computed principal components
     h5s (list): list of h5 files
     yamls (list): list of yaml files
@@ -560,7 +565,7 @@ def get_changepoints_dask(
 
         # Compute changepoints delayed job
         cps = dask.delayed(get_changepoints, pure=True)(
-            rps, timestamps=timestamps, **changepoint_params
+            rps, timestamps=timestamps, changepoint_params=changepoint_params
         )
 
         futures.append(cps)

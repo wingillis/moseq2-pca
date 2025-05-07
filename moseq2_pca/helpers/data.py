@@ -46,12 +46,4 @@ def load_pcs_for_cp(pca_file, config_data):
         if missing_data and not Path(config_data['pca_file_scores']).exists():
             raise RuntimeError("Need PCA scores to impute missing data, run apply pca first")
 
-    # Pack changepoint parameters
-    changepoint_params = {
-        'k': config_data['klags'],
-        'sigma': config_data['sigma'],
-        'peak_height': config_data['threshold'],
-        'peak_neighbors': config_data['neighbors'],
-    }
-
-    return pca_components, changepoint_params, missing_data, mask_params
+    return pca_components, missing_data, mask_params

@@ -4,7 +4,6 @@ GUI front-end operations for PCA.
 """
 
 import warnings
-import ruamel.yaml as yaml
 from moseq2_pca.util import read_yaml, write_yaml
 from .cli import train_pca, apply_pca, compute_changepoints
 from moseq2_pca.helpers.wrappers import train_pca_wrapper, apply_pca_wrapper, compute_changepoints_wrapper

@@ -15,7 +15,14 @@ from copy import deepcopy
 from tqdm.auto import tqdm
 from moseq2_pca.viz import plot_pca_results, changepoint_dist
 from moseq2_pca.helpers.data import load_pcs_for_cp
-from moseq2_pca.helpers.parameters import MouseProcessingParams, SVDConfig, DaskConfig, create_dataclass_from_dict, MaskParams
+from moseq2_pca.helpers.parameters import (
+    MouseProcessingParams,
+    SVDConfig,
+    DaskConfig,
+    create_dataclass_from_dict,
+    MaskParams,
+    ChangepointParams,
+)
 from moseq2_pca.pca.util import (
     apply_pca_dask,
     train_pca_dask,
@@ -338,6 +345,8 @@ def compute_changepoints_wrapper(input_dir, config_data, output_dir, output_file
 
     dask_config, config_data = create_dataclass_from_dict(DaskConfig, config_data)
 
+    changepoint_params, config_data = create_dataclass_from_dict(ChangepointParams, config_data)
+
     # Get loaded h5s and yamls
     output_dir, h5s, yamls = load_and_check_data(
         input_dir, output_dir
@@ -360,7 +369,7 @@ def compute_changepoints_wrapper(input_dir, config_data, output_dir, output_file
         pca_file = Path(pca_file)
 
     # Load Principal components, set up changepoint parameter dict, and optionally load reconstructed PCs.
-    pca_components, changepoint_params, missing_data, mask_params = load_pcs_for_cp(
+    pca_components, missing_data, mask_params = load_pcs_for_cp(
         pca_file, config_data
     )
 
@@ -393,19 +402,17 @@ def compute_changepoints_wrapper(input_dir, config_data, output_dir, output_file
         close_dask(client, cluster, dask_config.timeout)
 
     # Read Changepoints from saved file
-    with h5py.File(save_file, "r") as f:
-        cps = h5_to_dict(f, "cps")
+    cps = h5_to_dict(save_file, "cps")
 
     # add change point path to config file
     config_data["changepoint_file"] = str(save_file)
     # Plot and save Changepoint PDF histogram
-    block_durs = np.concatenate([np.diff(cp, axis=0) for k, cp in cps.items()])
+    block_durs = np.concatenate([np.diff(cp, axis=0) for cp in cps.values()])
     out = changepoint_dist(block_durs, headless=True)
     if out:
-        fig_path = save_file.with_name(save_file.stem + "_dist")
+        fig_path = save_file.with_name("changepoint_dist.png")
         fig, _ = out
-        fig.savefig(f"{fig_path}.png")
-        fig.savefig(f"{fig_path}.pdf")
-        fig.close("all")
+        for ext in ["png", "pdf"]:
+            fig.savefig(fig_path.with_suffix(f".{ext}"))
 
     return config_data

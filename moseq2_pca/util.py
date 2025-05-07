@@ -16,13 +16,13 @@ import numpy as np
 import scipy.signal
 from pathlib import Path
 from copy import deepcopy
-from ruamel.yaml import YAML
 from tqdm.auto import tqdm
+from ruamel.yaml import YAML
 from functools import partial
-from dask.distributed import Client
 from toolz import dissoc, merge
+from dask.distributed import Client
 from dask_jobqueue import SLURMCluster
-from moseq2_pca.helpers.parameters import MouseProcessingParams, DaskConfig
+from moseq2_pca.helpers.parameters import MouseProcessingParams, DaskConfig, ChangepointParams
 
 
 def recursive_find_h5s(root_dir: Path = Path.cwd()):
@@ -340,7 +340,10 @@ def h5_to_dict(h5file: str | h5py.File, path: str) -> dict:
     if isinstance(h5file, str):
         with h5py.File(h5file, 'r') as f:
             ans = h5_to_dict(f, path)
-            return ans
+        return ans
+
+    if isinstance(h5file[path], h5py.Dataset):
+        return {path: h5file[path][()]}
 
     for key, item in h5file[path].items():
         if isinstance(item, h5py.Dataset):
@@ -546,7 +549,7 @@ def close_dask(client, cluster, timeout):
             print('Could not shutdown dask client')
 
 
-def get_rps(frames, rps: int= 600, normalize: bool = True):
+def get_rps(frames, rps: int = 600, normalize: bool = True):
     """
     Get random projections of frames.
 
@@ -571,7 +574,7 @@ def get_rps(frames, rps: int= 600, normalize: bool = True):
     return rproj
 
 
-def get_changepoints(scores, k=5, sigma=3, peak_height=.5, peak_neighbors=1,
+def get_changepoints(scores, changepoint_params: ChangepointParams,
                      baseline=True, timestamps=None):
     """
     Compute changepoints and its corresponding distribution. Changepoints describe
@@ -591,28 +594,28 @@ def get_changepoints(scores, k=5, sigma=3, peak_height=.5, peak_neighbors=1,
     normed_df (numpy.array): array of values for bar plot
     """
 
-    k = int(k)
-    peak_neighbors = int(peak_neighbors)
-
     nanidx = np.isnan(scores)
     smooth_scores = np.nan_to_num(scores)
 
-    if sigma is not None and sigma > 0:
-        smooth = partial(gauss_smooth, sig=sigma)
+    if changepoint_params.sigma is not None and changepoint_params.sigma > 0:
+        smooth = partial(gauss_smooth, sig=changepoint_params.sigma)
         smooth_scores = np.apply_along_axis(smooth, 1, smooth_scores)
 
-    smooth_scores[:, k // 2:-k // 2] = np.square(smooth_scores[:, k:] - smooth_scores[:, :-k])
+    smooth_scores[:, changepoint_params.klags // 2 : -changepoint_params.klags // 2] = np.square(
+        smooth_scores[:, changepoint_params.klags :] - smooth_scores[:, : -changepoint_params.klags]
+    )
     smooth_scores[nanidx] = np.nan
 
-    if sigma is not None and sigma > 0:
-        smooth_scores[:, :int(6 * sigma)] = np.nan
-        smooth_scores[:, -int(6 * sigma):] = np.nan
+    if changepoint_params.sigma is not None and changepoint_params.sigma > 0:
+        smooth_scores[:, :int(6 * changepoint_params.sigma)] = np.nan
+        smooth_scores[:, -int(6 * changepoint_params.sigma):] = np.nan
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         smooth_scores = np.nanmean(smooth_scores, axis=0)
 
-        if baseline: smooth_scores -= np.nanmin(smooth_scores)
+        if baseline:
+            smooth_scores -= np.nanmin(smooth_scores)
 
         if timestamps is not None:
             smooth_scores, _, _ = insert_nans(
@@ -620,8 +623,8 @@ def get_changepoints(scores, k=5, sigma=3, peak_height=.5, peak_neighbors=1,
 
         smooth_scores = np.squeeze(smooth_scores)
         cps = scipy.signal.argrelextrema(
-            smooth_scores, np.greater, order=peak_neighbors)[0]
-        cps = cps[np.argwhere(smooth_scores[cps] > peak_height)]
+            smooth_scores, np.greater, order=changepoint_params.neighbors)[0]
+        cps = cps[np.argwhere(smooth_scores[cps] > changepoint_params.threshold)]
 
     return cps, smooth_scores
 
