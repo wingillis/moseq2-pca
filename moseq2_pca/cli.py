@@ -106,8 +106,7 @@ def generate_config(output_file, camera_type):
 @click.option('--local-processes', default=False, type=bool, help='Used with a local cluster. If True: use processes, If False: use threads')
 @click.option('--overwrite-pca-train', default=False, type=bool, help='Used to bypass the pca overwrite question. If True: skip question, run automatically')
 @click.option('--camera-type', default='k2', type=str, help='specify the camera type (k2 or azure), default is k2')
-@click.pass_obj
-def train_pca(ctx_obj, input_dir, output_dir, output_file, **cli_args):
+def train_pca(input_dir, output_dir, output_file, **cli_args):
     # function writes output pca path to config_data
     if cli_args.get('camera_type') == 'azure':
         # check if parameters are set to k2 default, change to azure default
@@ -117,11 +116,7 @@ def train_pca(ctx_obj, input_dir, output_dir, output_file, **cli_args):
         if cli_args['tailfilter_size'] == (9, 9):
             cli_args['tailfilter_size'] = (15, 15)
 
-    config_data = train_pca_wrapper(input_dir, cli_args, output_dir, output_file)
-    # write config_data to config_file if there is one
-    if ctx_obj.get('config_path'):
-        # combine new config with old config to add output pca path to config.yaml
-        combine_new_config(ctx_obj.get('config_path'), config_data)
+    train_pca_wrapper(input_dir, cli_args, output_dir, output_file)
     
 
 @cli.command(name='apply-pca', help='Compute PCA Scores of extraction data given a pre-trained PCA')
@@ -134,14 +129,9 @@ def train_pca(ctx_obj, input_dir, output_dir, output_file, **cli_args):
 @click.option('--fps', default=30, type=int, help='Frames per second (frame rate)')
 @click.option('--detrend-window', default=0, type=float, help="Length of detrend window (in seconds, 0 for no detrending)")
 @click.option('--overwrite-pca-apply', default=False, type=bool, help='Used to bypass the pca overwrite question. If True: skip question, run automatically')
-@click.pass_obj
-def apply_pca(ctx_obj, input_dir, output_dir, output_file, **cli_args):
+def apply_pca(input_dir, output_dir, output_file, **cli_args):
     # function writes output pc score path to config_data
-    config_data = apply_pca_wrapper(input_dir, cli_args, output_dir, output_file)
-    # write config_data to config_file if there is one
-    if ctx_obj.get('config_path'):
-        # combine new config with old config to add output pc score path to config.yaml
-        combine_new_config(ctx_obj.get('config_path'), config_data)
+    apply_pca_wrapper(input_dir, cli_args, output_dir, output_file)
         
 
 @cli.command('compute-changepoints', help='Compute the Model-Free Syllable Changepoints based on the PCA/PCA_Scores')
@@ -157,15 +147,10 @@ def apply_pca(ctx_obj, input_dir, output_dir, output_file, **cli_args):
 @click.option('-s', '--sigma', type=float, default=3.5, help="Standard deviation of gaussian smoothing filter")
 @click.option('-d', '--dims', type=int, default=300, help="Number of random projections to use")
 @click.option('--fps', default=30, type=int, help="Frames per second (frame rate)")
-@click.pass_obj
-def compute_changepoints(ctx_obj, input_dir, output_dir, output_file, **cli_args):
+def compute_changepoints(input_dir, output_dir, output_file, **cli_args):
     # function writes output changepoint path to config_data
-    config_data = compute_changepoints_wrapper(input_dir, cli_args, output_dir, output_file)
-    # write config_data to config_file if there is one
-    if ctx_obj.get('config_path'):
-        # combine new config with old config to add output pc score path to config.yaml
-        combine_new_config(ctx_obj.get('config_path'), config_data)
-    
+    compute_changepoints_wrapper(input_dir, cli_args, output_dir, output_file)
+
 
 if __name__ == '__main__':
     cli()
