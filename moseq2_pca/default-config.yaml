@@ -32,6 +32,7 @@ pca:
   train_on_subset: 1
   recon_pcs: 10
   rank: 25
+  n_power_iter: 1
 
   # PCA application parameters
   fill_gaps: true

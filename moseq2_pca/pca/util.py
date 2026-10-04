@@ -55,6 +55,42 @@ def mask_data(original_data, mask, new_data):
     return output
 
 
+def _scaled_svd_compressed(dask_array, mean, svd_config):
+    """
+    Run dask's randomized svd_compressed on the centered data with an exact
+    power-of-two rescaling and n_power_iter power iterations.
+
+    Power iterations dramatically improve the accuracy and run-to-run
+    reproducibility of the randomized SVD, but dask's 'power' iterator does
+    not re-orthonormalize between iterations, so intermediate values grow by
+    ~sigma**2 per iteration and can overflow float32 on production-size
+    corpora. Dividing by a power of two is exact in floating point (only the
+    exponent changes), so components are unaffected and the singular values
+    are simply rescaled back afterwards.
+
+    Returns (u, s, v) in the ORIGINAL (unscaled) units.
+    """
+    centered = dask_array - mean
+
+    max_abs = da.abs(centered).max()
+    scale = float(da.compute(max_abs)[0])
+    if scale > 0 and np.isfinite(scale):
+        scale = 2.0 ** np.ceil(np.log2(scale))
+    else:
+        scale = 1.0
+
+    u, s, v = lng.svd_compressed(
+        centered / scale,
+        k=svd_config.rank,
+        n_power_iter=svd_config.n_power_iter,
+        compute=svd_config.memory_efficient,
+    )
+    # u (left singular vectors) is unitary and needs no rescaling; only the
+    # singular values carry the scale, so u @ diag(s) @ v reconstructs the
+    # original centered matrix.
+    return u, s * scale, v
+
+
 def compute_svd(
     dask_array: da.Array,
     mean: np.ndarray,
@@ -85,12 +121,7 @@ def compute_svd(
 
     if not svd_config.missing_data:
         # Compute PCs
-        _, s, v = lng.svd_compressed(
-            dask_array - mean,
-            k=svd_config.rank,
-            n_power_iter=0,
-            compute=svd_config.memory_efficient,
-        )
+        _, s, v = _scaled_svd_compressed(dask_array, mean, svd_config)
     else:
         dask_array, mean, s, v = compute_iterative_svd(
             dask_array=dask_array,
@@ -133,12 +164,7 @@ def compute_iterative_svd(dask_array, mean, mask, svd_config, min_height, max_he
     for iter in tqdm(
         range(svd_config.iters), total=svd_config.iters, desc="Computing Iterative PCA"
     ):
-        u, s, v = lng.svd_compressed(
-            dask_array - mean,
-            k=svd_config.rank,
-            n_power_iter=0,
-            compute=svd_config.memory_efficient,
-        )
+        u, s, v = _scaled_svd_compressed(dask_array, mean, svd_config)
         if iter < svd_config.iters - 1:
             recon = (
                 u[:, : svd_config.recon_pcs]

@@ -5,7 +5,8 @@ CLI for PCA and model-free changepoint analysis.
 import click
 from moseq2_pca.util import combine_new_config, read_yaml
 from moseq2_pca.helpers.wrappers import (train_pca_wrapper, apply_pca_wrapper,
-                                         compute_changepoints_wrapper)
+                                         compute_changepoints_wrapper,
+                                         clip_scores_wrapper)
 from moseq2_pca.cli_spec import (COMMON_PCA_OPTIONS, DASK_PARAMETERS, 
                                PCA_TRAIN_OPTIONS, option_spec)
 from pathlib import Path
@@ -150,6 +151,15 @@ def apply_pca(input_dir, output_dir, output_file, **cli_args):
 def compute_changepoints(input_dir, output_dir, output_file, **cli_args):
     # function writes output changepoint path to config_data
     compute_changepoints_wrapper(input_dir, cli_args, output_dir, output_file)
+
+
+@cli.command('clip-scores', help='Clip specified number of frames from PCA scores at the beginning or end')
+@click.argument('pca_file', type=click.Path(exists=True, resolve_path=True))
+@click.argument('clip_samples', type=int)
+@click.option('--from-end', type=bool, is_flag=True, help="if true clip from end rather than beginning")
+def clip_scores(pca_file, clip_samples, from_end):
+    new_file = clip_scores_wrapper(pca_file, clip_samples, from_end)
+    print(f"Clipped scores written to {new_file}")
 
 
 if __name__ == '__main__':

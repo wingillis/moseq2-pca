@@ -78,6 +78,14 @@ class SVDConfig:
     # missing_data (bool): Whether to use missing data for SVD.
     missing_data: bool = False
 
+    # Number of power iterations for the randomized SVD. The release code
+    # hardcoded 0 (a single-projection approximation, which carries a large
+    # approximation error and high run-to-run variance). One power iteration
+    # already recovers singular values to ~1e-4 relative accuracy on depth
+    # video at the cost of a single extra pass over the data; 4 is fully
+    # converged.
+    n_power_iter: int = 1
+
     chunk_size: int = 4000
 
     # set to True if you want to use memory efficient SVD when data is larger than available memory

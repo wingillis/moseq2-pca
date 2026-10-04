@@ -132,7 +132,10 @@ PCA_TRAIN_OPTIONS = [
         ["--rank"],
         {'default': 25, 'type': int, 'help': 'Rank for compressed SVD'}
     ),
-    
+    (
+        ["--n-power-iter"],
+        {'default': 1, 'type': int, 'help': 'Number of power iterations for the randomized SVD (0 reproduces the old single-projection behavior; 4 is fully converged)'}
+    ),
     
 ]
 

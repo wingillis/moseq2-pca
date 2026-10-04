@@ -38,6 +38,36 @@ from moseq2_pca.util import (
     read_yaml,
 )
 
+
+def clip_scores_wrapper(pca_file, clip_samples, from_end=False):
+    """
+    Clip PCA scores from the beginning or end, writing a new
+    `<basename>_clip.h5` file next to the input.
+
+    Args:
+    pca_file (str | Path): Path to PCA scores.
+    clip_samples (int): number of samples to clip from beginning or end
+    from_end (bool): if true clip from end rather than beginning
+
+    Returns:
+    new_filename (Path): path to the clipped scores file
+    """
+
+    pca_file = Path(pca_file)
+    new_filename = pca_file.with_name(pca_file.stem + "_clip.h5")
+
+    with h5py.File(pca_file, "r") as f, h5py.File(new_filename, "w") as f2:
+        f.copy("/metadata", f2)
+        for key in tqdm(f["/scores"].keys(), desc="Copying data"):
+            if from_end:
+                f2[f"/scores/{key}"] = f[f"/scores/{key}"][:-clip_samples]
+                f2[f"/scores_idx/{key}"] = f[f"/scores_idx/{key}"][:-clip_samples]
+            else:
+                f2[f"/scores/{key}"] = f[f"/scores/{key}"][clip_samples:]
+                f2[f"/scores_idx/{key}"] = f[f"/scores_idx/{key}"][clip_samples:]
+
+    return new_filename
+
 def load_and_check_data(input_dir, output_dir):
     """
     Load relevant h5 and yaml files found in given input directory, then check for timestamps and warn the user if they are missing.
