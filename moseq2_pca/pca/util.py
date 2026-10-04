@@ -17,6 +17,7 @@ from moseq2_pca.helpers.parameters import (
     SVDConfig,
     DaskConfig,
     ChangepointParams,
+    MaskParams,
 )
 from moseq2_pca.util import (
     clean_frames,
@@ -25,6 +26,13 @@ from moseq2_pca.util import (
     get_changepoints,
     get_rps,
 )
+
+
+def _coerce_mask_params(mask_params):
+    """Accept either a MaskParams dataclass or an equivalent dict."""
+    if isinstance(mask_params, dict):
+        return MaskParams(**mask_params)
+    return mask_params
 
 
 def mask_data(original_data, mask, new_data):
@@ -190,7 +198,7 @@ def get_timestamps(f: h5py.File, fps=30):
         print(
             "WARNING: timestamps were not found. Using default frame series-ordering."
         )
-        timestamps = len(f['frames']) / fps
+        timestamps = np.arange(len(f["frames"])) / fps
 
     return timestamps
 
@@ -351,6 +359,7 @@ def apply_pca_dask(
     futures = []
     uuids = []
     h5_file_pointers = []
+    mask_params = _coerce_mask_params(mask_params)
 
     for h5, yml in tqdm(zip(h5s, yamls), total=len(h5s), desc="Loading Data"):
 
@@ -371,8 +380,8 @@ def apply_pca_dask(
             # Load masked data
             mask = da.from_array(h5p[h5_mask_path], chunks=frames.chunks)
             mask = da.logical_and(
-                mask < mask_params["mask_threshold"],
-                frames > mask_params["mask_height_threshold"],
+                mask < mask_params.mask_threshold,
+                frames > mask_params.mask_height_threshold,
             )
             frames = da.where(mask, 0, frames)
             mask = mask.reshape(-1, frames.shape[1] * frames.shape[2])
@@ -502,6 +511,7 @@ def get_changepoints_dask(
     futures = []
     uuids = []
     h5_file_pointers = []
+    mask_params = _coerce_mask_params(mask_params)
 
     for h5, yml in tqdm(
         zip(h5s, yamls),
@@ -532,8 +542,8 @@ def get_changepoints_dask(
             # Load masked data
             mask = da.from_array(h5p[h5_mask_path], chunks=frames.chunks)
             mask = da.logical_and(
-                mask < mask_params["mask_threshold"],
-                frames > mask_params["mask_height_threshold"],
+                mask < mask_params.mask_threshold,
+                frames > mask_params.mask_height_threshold,
             )
             frames[mask] = 0
 

@@ -323,12 +323,12 @@ def get_metadata_path(h5file):
             raise KeyError('acquisition metadata not found')
 
 
-def h5_to_dict(h5file: str | h5py.File, path: str) -> dict:
+def h5_to_dict(h5file: str | Path | h5py.File, path: str) -> dict:
     """
     Read all contents from h5 and returns them in a nested dict object.
 
     Args:
-    h5file (str | h5py.File): path to h5 file
+    h5file (str | Path | h5py.File): path to h5 file
     path (str): path to group within h5 file
 
     Returns:
@@ -337,7 +337,7 @@ def h5_to_dict(h5file: str | h5py.File, path: str) -> dict:
 
     ans = {}
 
-    if isinstance(h5file, str):
+    if isinstance(h5file, (str, Path)):
         with h5py.File(h5file, 'r') as f:
             ans = h5_to_dict(f, path)
         return ans

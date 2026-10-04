@@ -10,6 +10,7 @@ from dask.distributed import Client, LocalCluster
 from moseq2_pca.util import gaussian_kernel1d, gauss_smooth, read_yaml, insert_nans, \
     check_timestamps, recursive_find_h5s, clean_frames, \
     get_timestamp_path, get_metadata_path, initialize_dask, get_rps, get_changepoints, h5_to_dict
+from moseq2_pca.helpers.parameters import MouseProcessingParams, DaskConfig
 
 
 class TestUtils(TestCase):
@@ -92,16 +93,23 @@ class TestUtils(TestCase):
 
         frames = np.tile(tmp_image, (nframes, 1, 1))
 
-        medfilter_space = [1, 1]
+        medfilter_space = (1, 1)
         gaussfilter_space = None
-        medfilter_time = [3]
-        gaussfilter_time = None
+        medfilter_time = (3,)
+        gaussfilter_time = 0
         detrend_time = 1
         tailfilter = None
 
-        test_output = clean_frames(frames, medfilter_space=medfilter_space, gaussfilter_space=gaussfilter_space,
-                     medfilter_time=medfilter_time, gaussfilter_time=gaussfilter_time, detrend_time=detrend_time,
-                     tailfilter=tailfilter, tail_threshold=5)
+        params = MouseProcessingParams(
+            medfilter_space=medfilter_space,
+            gaussfilter_space=gaussfilter_space,
+            medfilter_time=medfilter_time,
+            gaussfilter_time=gaussfilter_time,
+            tailfilter_size=(9, 9),
+        )
+        params.tailfilter = tailfilter
+
+        test_output = clean_frames(frames, mouse_proc_params=params, detrend_time=detrend_time)
 
         np.testing.assert_equal(np.any(np.not_equal(frames, test_output)), True)
 
@@ -164,20 +172,18 @@ class TestUtils(TestCase):
     # TODO: possibly implement some kwargs edge cases
     def test_initialize_dask(self):
 
-        nworkers = 50
-        processes = 1
-        memory = '4GB'
-        cores = 1
-        wall_time = '01:00:00'
-        queue = 'debug'
-        cluster_type = 'local'
-        timeout = 10
-        cache_path = os.path.expanduser('~/moseq2_pca')
+        dask_config = DaskConfig(
+            nworkers=50,
+            processes=1,
+            memory='4GB',
+            cores=1,
+            wall_time='01:00:00',
+            queue='debug',
+            cluster_type='local',
+            timeout=10,
+        )
 
-        client, cluster, workers = initialize_dask(nworkers=nworkers, processes=processes, memory=memory,
-                                                   cores=cores, wall_time=wall_time, queue=queue,
-                                                   cluster_type=cluster_type,
-                                                   timeout=timeout, cache_path=cache_path)
+        client, cluster, workers = initialize_dask(dask_config)
 
         assert isinstance(client, Client)
         assert isinstance(cluster, LocalCluster)

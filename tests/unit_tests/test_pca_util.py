@@ -3,12 +3,24 @@ import cv2
 import h5py
 import numpy as np
 import dask.array as da
-import ruamel.yaml as yaml
 from unittest import TestCase
 from dask.distributed import Client
-from moseq2_pca.util import recursive_find_h5s
-from moseq2_pca.helpers.data import get_pca_yaml_data
-from moseq2_pca.pca.util import mask_data, train_pca_dask, apply_pca_dask, apply_pca_local, get_changepoints_dask
+from moseq2_pca.util import recursive_find_h5s, read_yaml
+from moseq2_pca.helpers.parameters import (
+    MouseProcessingParams,
+    SVDConfig,
+    DaskConfig,
+    ChangepointParams,
+    MaskParams,
+    create_dataclass_from_dict,
+)
+from moseq2_pca.pca.util import (
+    mask_data,
+    train_pca_dask,
+    apply_pca_dask,
+    get_changepoints_dask,
+)
+
 
 class TestPCAUtils(TestCase):
 
@@ -44,8 +56,7 @@ class TestPCAUtils(TestCase):
         input_dir = 'data/proc/'
         config_file = 'data/config.yaml'
 
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
+        config_data = read_yaml(config_file)
 
         h5s, dicts, yamls = recursive_find_h5s(input_dir)
 
@@ -53,29 +64,25 @@ class TestPCAUtils(TestCase):
         arrays = [da.from_array(fp['/frames'], chunks=(1000, -1, -1)) for fp in h5ps]
         stacked_array = da.concatenate(arrays, axis=0)
 
-        stacked_array[stacked_array < 10] = 0
-        stacked_array[stacked_array > 100] = 0
-        strel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, tuple(config_data['tailfilter_size']))
-        tailfilter = strel
+        stacked_array = da.where(
+            da.logical_or(stacked_array < 10, stacked_array > 100), 0, stacked_array
+        )
 
-        clean_params = {
-            'gaussfilter_space': config_data['gaussfilter_space'],
-            'gaussfilter_time': config_data['gaussfilter_time'],
-            'tailfilter': tailfilter,
-            'medfilter_time': config_data['medfilter_time'],
-            'medfilter_space': config_data['medfilter_space']
-        }
+        mouse_proc_params, _ = create_dataclass_from_dict(MouseProcessingParams, config_data)
+        svd_config, _ = create_dataclass_from_dict(SVDConfig, config_data)
+        dask_config, _ = create_dataclass_from_dict(DaskConfig, config_data)
+        svd_config.chunk_size = 1000
 
         client = Client(processes=True)
 
-        output_dict = \
-            train_pca_dask(dask_array=stacked_array, mask=None,
-                           clean_params=clean_params,
-                           rank=config_data['rank'], cluster_type=config_data['cluster_type'],
-                           min_height=config_data['min_height'],
-                           max_height=config_data['max_height'], client=client,
-                           iters=config_data['missing_data_iters'],
-                           recon_pcs=config_data['recon_pcs'])
+        output_dict = train_pca_dask(
+            dask_array=stacked_array,
+            mask=None,
+            mouse_proc_params=mouse_proc_params,
+            svd_config=svd_config,
+            dask_config=dask_config,
+            client=client,
+        )
         client.restart()
         client.close()
         for fp in h5ps:
@@ -96,73 +103,61 @@ class TestPCAUtils(TestCase):
             except ValueError as e:
                 assert isinstance(e, ValueError)
 
-    def test_apply_pca_local(self):
-
-        input_dir = 'data/proc/'
-        pca_path = 'data/_pca/pca'
-        save_file = 'data/_pca/local_test_pca_scores'
-        config_file = 'data/config.yaml'
-
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
-
-        with h5py.File(f'{pca_path}.h5', 'r') as f:
-            pca_components = f['components'][()]
-
-        clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
-
-        h5s, dicts, yamls = recursive_find_h5s(input_dir)
-
-        apply_pca_local(pca_components=pca_components, h5s=h5s, yamls=yamls,
-                        clean_params=clean_params,
-                        save_file=save_file, chunk_size=config_data['chunk_size'],
-                        mask_params=mask_params, fps=config_data['fps'],
-                        missing_data=missing_data)
-
-        assert os.path.exists(f'{save_file}.h5')
-        os.remove(f'{save_file}.h5')
-
-
     def test_apply_pca_dask(self):
 
         input_dir = 'data/proc/'
-        pca_path = 'data/_pca/pca'
-        save_file = 'data/_pca/dask_test_pca_scores'
+        pca_path = 'data/_pca/pca.h5'
+        save_file = 'data/_pca/dask_test_pca_scores.h5'
         config_file = 'data/config.yaml'
 
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
+        config_data = read_yaml(config_file)
 
-        with h5py.File(f'{pca_path}.h5', 'r') as f:
+        with h5py.File(pca_path, 'r') as f:
             pca_components = f['components'][()]
 
-        clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
+        mouse_proc_params, _ = create_dataclass_from_dict(MouseProcessingParams, config_data)
+        svd_config, _ = create_dataclass_from_dict(SVDConfig, config_data)
+        mask_params = MaskParams()
 
         h5s, dicts, yamls = recursive_find_h5s(input_dir)
 
-        chunk_size = 100
+        svd_config.chunk_size = 100
         client = Client(processes=True)
 
-        apply_pca_dask(pca_components, h5s, yamls, clean_params,
-                       save_file, chunk_size, mask_params, missing_data,
-                       client)
+        apply_pca_dask(
+            pca_components=pca_components,
+            h5s=h5s,
+            yamls=yamls,
+            mouse_proc_params=mouse_proc_params,
+            save_file=save_file,
+            mask_params=mask_params,
+            svd_config=svd_config,
+            client=client,
+        )
 
         client.restart()
 
-        assert os.path.exists(f'{save_file}.h5')
-        os.remove(f'{save_file}.h5')
+        assert os.path.exists(save_file)
+        os.remove(save_file)
 
-        missing_data = True
+        svd_config.missing_data = True
 
-        apply_pca_dask(pca_components, h5s, yamls, clean_params,
-                       save_file, chunk_size, mask_params, missing_data,
-                       client)
+        apply_pca_dask(
+            pca_components=pca_components,
+            h5s=h5s,
+            yamls=yamls,
+            mouse_proc_params=mouse_proc_params,
+            save_file=save_file,
+            mask_params=mask_params,
+            svd_config=svd_config,
+            client=client,
+        )
 
         client.restart()
         client.close()
 
-        assert os.path.exists(f'{save_file}.h5')
-        os.remove(f'{save_file}.h5')
+        assert os.path.exists(save_file)
+        os.remove(save_file)
 
         # testing list comprehension file closing
         h5_file_pointers = [h5py.File(h5, 'r') for h5 in h5s]
@@ -179,68 +174,81 @@ class TestPCAUtils(TestCase):
     def test_get_changepoints_dask(self):
 
         input_dir = 'data/proc/'
-        pca_path = 'data/_pca/pca'
-        save_file = 'data/_pca/test_changepoints'
+        pca_path = 'data/_pca/pca.h5'
+        save_file = 'data/_pca/test_changepoints.h5'
         config_file = 'data/config.yaml'
 
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
+        config_data = read_yaml(config_file)
 
-        with h5py.File(f'{pca_path}.h5', 'r') as f:
+        with h5py.File(pca_path, 'r') as f:
             pca_components = f['components'][()]
 
-        clean_params, mask_params, missing_data = get_pca_yaml_data(f'{pca_path}.yaml')
+        changepoint_params, _ = create_dataclass_from_dict(ChangepointParams, config_data)
+        mask_params = MaskParams()
 
         missing_data = False
 
         h5s, dicts, yamls = recursive_find_h5s(input_dir)
 
-        changepoint_params = {
-            'k': config_data['klags'],
-            'sigma': config_data['sigma'],
-            'peak_height': config_data['threshold'],
-            'peak_neighbors': config_data['neighbors'],
-            'rps': config_data['dims']
-        }
-
         chunk_size = 100
         client = Client(processes=True)
 
-        get_changepoints_dask(changepoint_params, pca_components, h5s, yamls,
-                              save_file, chunk_size, mask_params, missing_data,
-                              client)
+        get_changepoints_dask(
+            changepoint_params=changepoint_params,
+            pca_components=pca_components,
+            h5s=h5s,
+            yamls=yamls,
+            save_file=save_file,
+            chunk_size=chunk_size,
+            mask_params=mask_params,
+            missing_data=missing_data,
+            client=client,
+        )
         client.restart()
         client.close()
         client = Client(processes=True)
 
-        assert os.path.exists(f'{save_file}.h5')
-        os.remove(f'{save_file}.h5')
+        assert os.path.exists(save_file)
+        os.remove(save_file)
 
-        missing_data_save_file = 'data/_pca/dask_test_pca_scores'
+        missing_data_save_file = 'data/_pca/dask_test_pca_scores.h5'
 
         missing_data = True
 
-        apply_pca_dask(pca_components, h5s, yamls, clean_params,
-                       missing_data_save_file, chunk_size, mask_params, missing_data,
-                       client)
+        svd_config, _ = create_dataclass_from_dict(SVDConfig, config_data)
+        svd_config.chunk_size = chunk_size
+        mouse_proc_params, _ = create_dataclass_from_dict(MouseProcessingParams, config_data)
 
-        assert os.path.exists(f'{missing_data_save_file}.h5')
+        apply_pca_dask(
+            pca_components=pca_components,
+            h5s=h5s,
+            yamls=yamls,
+            mouse_proc_params=mouse_proc_params,
+            save_file=missing_data_save_file,
+            mask_params=mask_params,
+            svd_config=svd_config,
+            client=client,
+        )
 
-        changepoint_params = {
-            'k': config_data['klags'],
-            'sigma': config_data['sigma'],
-            'peak_height': config_data['threshold'],
-            'peak_neighbors': config_data['neighbors'],
-            'rps': config_data['dims']
-        }
+        assert os.path.exists(missing_data_save_file)
 
-        get_changepoints_dask(changepoint_params, pca_components, h5s, yamls,
-                              save_file, chunk_size, mask_params, missing_data,
-                              client, 30, pca_scores=f'{missing_data_save_file}.h5')
+        get_changepoints_dask(
+            changepoint_params=changepoint_params,
+            pca_components=pca_components,
+            h5s=h5s,
+            yamls=yamls,
+            save_file=save_file,
+            chunk_size=chunk_size,
+            mask_params=mask_params,
+            missing_data=missing_data,
+            client=client,
+            fps=30,
+            pca_scores=missing_data_save_file,
+        )
         client.restart()
         client.close()
 
-        assert os.path.exists(f'{save_file}.h5')
-        assert os.path.exists(f'{missing_data_save_file}.h5')
-        os.remove(f'{save_file}.h5')
-        os.remove(f'{missing_data_save_file}.h5')
+        assert os.path.exists(save_file)
+        assert os.path.exists(missing_data_save_file)
+        os.remove(save_file)
+        os.remove(missing_data_save_file)

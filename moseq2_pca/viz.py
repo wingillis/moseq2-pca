@@ -157,7 +157,11 @@ def changepoint_dist(cps, headless=False):
         print(cps.shape)
 
         ax = sns.histplot(
-            cps, bins=np.linspace(0, 10, 100), stat="density", kde=True, bw_adjust=0.5
+            cps,
+            bins=np.linspace(0, 10, 100),
+            stat="density",
+            kde=True,
+            kde_kws={"bw_adjust": 0.5},
         )
         ax.set(
             xlim=(0, 3),

@@ -66,23 +66,22 @@ def load_and_check_data(input_dir, output_dir):
     return output_dir, h5s, yamls
 
 
-def can_overwrite(config_data: dict, save_file: Path) -> bool:
+def can_overwrite(config_data: dict, save_file: Path, flag: str) -> bool:
     """
     Handle user input for overwriting PCA files.
 
     Args:
     config_data (dict): dict of relevant PCA parameters (image filtering etc.)
     save_file (Path): path to save PCA file
+    flag (str): name of the overwrite flag to honor ('overwrite_pca_train' or
+                'overwrite_pca_apply')
 
     Returns:
     bool: True if user wants to overwrite, False otherwise
     """
     save_file = save_file.with_suffix(".h5")
-    # check flags for overwriting in either the train or apply steps
-    if (
-        not config_data.get("overwrite_pca_train", False)
-        or not config_data.get("overwrite_pca_apply", False)
-    ) and save_file.exists():
+    # check the flag for the command that is actually running
+    if not config_data.get(flag, False) and save_file.exists():
         ow = input(
             f"The file {save_file} already exists.\nWould you like to overwrite it? [y -> yes, n -> no]: "
         )
@@ -116,7 +115,7 @@ def train_pca_wrapper(input_dir, config_data, output_dir, output_file):
     save_file = (output_dir / output_file).with_suffix('.h5')
 
     # Edge Case: Handling pre-existing PCA file
-    if not can_overwrite(config_data, save_file):
+    if not can_overwrite(config_data, save_file, "overwrite_pca_train"):
         return config_data
 
     params = deepcopy(config_data)
@@ -266,7 +265,7 @@ def apply_pca_wrapper(input_dir, config_data, output_dir, output_file):
 
     # Handling pre-existing PCA file
     # no intended pca overwrite
-    if not can_overwrite(config_data, save_file):
+    if not can_overwrite(config_data, save_file, "overwrite_pca_apply"):
         return config_data
 
     # Get path to trained PCA file to load PCs from
@@ -279,6 +278,13 @@ def apply_pca_wrapper(input_dir, config_data, output_dir, output_file):
     print("Loading PCs from", pca_file)
     with h5py.File(pca_file, "r") as f:
         pca_components = f[config_data["pca_path"]][()]
+
+    # Build parameters from the CLI/config first so they are always defined,
+    # then (if the training yaml exists) re-derive them from the parameters
+    # that were used during training.
+    mouse_proc_params, config_data = create_dataclass_from_dict(MouseProcessingParams, config_data)
+    svd_config, config_data = create_dataclass_from_dict(SVDConfig, config_data)
+    mask_params, config_data = create_dataclass_from_dict(MaskParams, config_data)
 
     # Get the yaml for pca, check parameters
     pca_yaml = pca_file.with_suffix('.yaml')
