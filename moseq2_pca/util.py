@@ -14,87 +14,23 @@ import platform
 import subprocess
 import numpy as np
 import scipy.signal
-from glob import glob
+from pathlib import Path
 from copy import deepcopy
-import ruamel.yaml as yaml
 from tqdm.auto import tqdm
+from ruamel.yaml import YAML
 from functools import partial
+from toolz import dissoc, merge
 from dask.distributed import Client
 from dask_jobqueue import SLURMCluster
-from os.path import join, exists, abspath, expanduser
+from moseq2_pca.helpers.parameters import MouseProcessingParams, DaskConfig, ChangepointParams
 
 
-# from https://stackoverflow.com/questions/46358797/
-# python-click-supply-arguments-and-options-from-a-configuration-file
-def command_with_config(config_file_param_name):
-    """
-    Helper function to assign variables from a config file. 
-    Hierachy of CLI prameters: params from cli options > params from config_file > default params
-    
-    Args:
-    config_file_param_name (str): parameter name to update with config file variable.
-
-    Returns:
-    custom_command_class (click.Command): updated Click Command containing parameters from inputted config file.
-    """
-
-    class custom_command_class(click.Command):
-
-        def invoke(self, ctx):
-            config_file = ctx.params[config_file_param_name]
-            param_defaults = {}
-            
-            # put default parameters in param_defaults dictionary
-            for param in self.params:
-                if type(param) is click.core.Option:
-                    param_defaults[param.human_readable_name] = param.default
-
-            if config_file is not None:
-                # read params from config_file
-                config_data = read_yaml(config_file)
-
-                # set config_data['output_file'] ['output_dir'] ['input_dir'] to None to avoid overwriting previous files
-                config_data['input_dir'] = None
-                config_data['output_dir'] = None
-                config_data['output_file'] = None
-
-                for param, value in ctx.params.items():
-                    # set params to the params in config file when the param is not none
-                    if param in config_data and config_data[param]:
-                        if type(value) is tuple and type(config_data[param]) is int:
-                            ctx.params[param] = tuple([config_data[param]])
-                        elif type(value) is tuple:
-                            ctx.params[param] = tuple(config_data[param])
-                        else:
-                            ctx.params[param] = config_data[param]
-
-                        # overwrite the parameter if users specify params with cli options
-                        if param_defaults[param] != value:
-                            ctx.params[param] = value
-
-                # removed flags
-                flag_list = ['missing_data', 'use_fft', 'verbose', 'from_end']
-                combined = {k:v for k,v in ctx.params.items() if k not in flag_list}
-                # combine params with config_params
-                config_data = {**config_data, **combined}
-                # write parameters to config_file
-                with open(config_file, 'w') as f:
-                    yaml.safe_dump(config_data, f)
-            return super(custom_command_class, self).invoke(ctx)
-
-    return custom_command_class
-
-
-def recursive_find_h5s(root_dir=os.getcwd(),
-                       ext='.h5',
-                       yaml_string='{}.yaml'):
+def recursive_find_h5s(root_dir: Path = Path.cwd()):
     """
     Recursively find h5 files, along with yaml files with the same basename
 
     Args:
-    root_dir (str): path to base directory to begin recursive search in.
-    ext (str): extension to search for
-    yaml_string (str): string for filename formatting when saving data
+    root_dir (Path): path to base directory to begin recursive search in.
 
     Returns:
     h5s (list): list of found h5 files
@@ -102,10 +38,7 @@ def recursive_find_h5s(root_dir=os.getcwd(),
     yamls (list): list of found yaml files
     """
 
-    if not ext.startswith('.'):
-        ext = '.' + ext
-
-    def has_frames(f):
+    def has_frames(f: Path):
         try:
             with h5py.File(f, 'r') as h5f:
                 return 'frames' in h5f
@@ -113,10 +46,14 @@ def recursive_find_h5s(root_dir=os.getcwd(),
             warnings.warn(f'Error reading {f}, skipping...')
             return False
 
-    h5s = glob(join(abspath(root_dir), '**', f'*{ext}'), recursive=True)
-    h5s = filter(lambda f: exists(yaml_string.format(f.replace(ext, ''))), h5s)
+    # recursively find all h5 files
+    h5s = root_dir.rglob('*.h5')
+    # filter out h5 files that don't have a corresponding yaml file
+    h5s = list(filter(lambda f: f.with_suffix('.yaml').exists(), h5s))
+    # filter out h5 files that don't have frames
     h5s = list(filter(has_frames, h5s))
-    yamls = list(map(lambda f: yaml_string.format(f.replace(ext, '')), h5s))
+
+    yamls = [f.with_suffix('.yaml') for f in h5s]
     dicts = list(map(read_yaml, yamls))
 
     return h5s, dicts, yamls
@@ -166,22 +103,15 @@ def gaussian_kernel1d(n=None, sig=3):
     return kernel
 
 
-def clean_frames(frames, medfilter_space=None, gaussfilter_space=None,
-                 medfilter_time=None, gaussfilter_time=None, detrend_time=None,
-                 tailfilter=None, tail_threshold=5):
+def clean_frames(frames: np.ndarray, mouse_proc_params: MouseProcessingParams, detrend_time: int = None):
     """
     Filter spatial/temporal noise from frames using Median and Gaussian filters,
     given kernel sizes for each respective requested filter.
 
     Args:
     frames (numpy.ndarray): frames to filter.
-    medfilter_space (list): median spatial filter kernel.
-    gaussfilter_space (list): gaussian spatial filter kernel.
-    medfilter_time (list): median temporal filter.
-    gaussfilter_time (list): gaussian temporal filter.
-    detrend_time (int): number of frames to lag for.
-    tailfilter (int): size of tail-filter kernel.
-    tail_threshold (int): threshold value to use for tail filtering
+    mouse_proc_params (MouseProcessingParams): parameters for mouse processing.
+    detrend_time (int): number of frames to use for estimating a trend.
 
     Returns:
     out (numpy.ndarray): filtered frames.
@@ -189,66 +119,51 @@ def clean_frames(frames, medfilter_space=None, gaussfilter_space=None,
 
     out = np.copy(frames)
 
-    if tailfilter is not None:
+    if mouse_proc_params.tailfilter is not None:
         for i in range(frames.shape[0]):
-            mask = cv2.morphologyEx(out[i], cv2.MORPH_OPEN, tailfilter) > tail_threshold
+            mask = (
+                cv2.morphologyEx(out[i], cv2.MORPH_OPEN, mouse_proc_params.tailfilter)
+                > mouse_proc_params.tail_threshold
+            )
             out[i] = out[i] * mask.astype(frames.dtype)
 
-    if medfilter_space is not None and np.all(np.array(medfilter_space) > 0):
+    if mouse_proc_params.medfilter_space is not None and np.all(
+        np.array(mouse_proc_params.medfilter_space) > 0
+    ):
         for i in range(frames.shape[0]):
-            for medfilt in medfilter_space:
+            for medfilt in mouse_proc_params.medfilter_space:
                 out[i] = cv2.medianBlur(out[i], medfilt)
 
-    if gaussfilter_space is not None and np.all(np.array(gaussfilter_space) > 0):
+    if mouse_proc_params.gaussfilter_space is not None and np.all(
+        np.array(mouse_proc_params.gaussfilter_space) > 0
+    ):
         for i in range(frames.shape[0]):
-            out[i] = cv2.GaussianBlur(out[i], (21, 21),
-                                      gaussfilter_space[0], gaussfilter_space[1])
+            out[i] = cv2.GaussianBlur(
+                out[i],
+                (21, 21),
+                *mouse_proc_params.gaussfilter_space,
+            )
 
-    if medfilter_time is not None and np.all(np.array(medfilter_time) > 0):
+    if mouse_proc_params.medfilter_time is not None and np.all(
+        np.array(mouse_proc_params.medfilter_time) > 0
+    ):
         for idx, i in np.ndenumerate(frames[0]):
-            for medfilt in medfilter_time:
-                out[:, idx[0], idx[1]] = \
-                    scipy.signal.medfilt(out[:, idx[0], idx[1]], medfilt)
+            for medfilt in mouse_proc_params.medfilter_time:
+                out[:, idx[0], idx[1]] = scipy.signal.medfilt(out[:, idx[0], idx[1]], medfilt)
 
-    if gaussfilter_time is not None and gaussfilter_time > 0:
-        kernel = gaussian_kernel1d(sig=gaussfilter_time)
+    if mouse_proc_params.gaussfilter_time is not None and mouse_proc_params.gaussfilter_time > 0:
+        kernel = gaussian_kernel1d(sig=mouse_proc_params.gaussfilter_time)
         for idx, i in np.ndenumerate(frames[0]):
-            out[:, idx[0], idx[1]] = \
-                np.convolve(out[:, idx[0], idx[1]], kernel, mode='same')
+            out[:, idx[0], idx[1]] = np.convolve(out[:, idx[0], idx[1]], kernel, mode="same")
 
     if detrend_time is not None and detrend_time > 0:
         kernel = gaussian_kernel1d(sig=detrend_time)
         for idx, i in np.ndenumerate(frames[0]):
-            out[:, idx[0], idx[1]] = \
-                out[:, idx[0], idx[1]] - gauss_smooth(out[:, idx[0], idx[1]], kernel=kernel)
+            out[:, idx[0], idx[1]] = out[:, idx[0], idx[1]] - gauss_smooth(
+                out[:, idx[0], idx[1]], kernel=kernel
+            )
 
     return out
-
-
-def select_strel(string='e', size=(10, 10)):
-    """
-    Select Structuring Element Shape. Accepts shapes ('ellipse', 'rectangle'), if neither
-    are given then 'ellipse' is used.
-
-    Args:
-    string (str): e for Ellipse, r for Rectangle
-    size (tuple): size of StructuringElement
-
-    Returns:
-    strel (cv2.StructuringElement): StructuringElement with specified size.
-    """
-    if not isinstance(size, tuple):
-        size = tuple(size)
-
-    if string is None or 'none' in string or np.all(np.array(size) == 0) or len(string) == 0:
-        strel = None
-    elif string[0].lower() == 'e':
-        strel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, size)
-    elif string[0].lower() == 'r':
-        strel = cv2.getStructuringElement(cv2.MORPH_RECT, size)
-    else:
-        strel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, size)
-    return strel
 
 
 def insert_nans(timestamps, data, fps=30):
@@ -275,13 +190,10 @@ def insert_nans(timestamps, data, fps=30):
     filled_data = deepcopy(data)
     filled_timestamps = deepcopy(timestamps)
 
-    if filled_data.ndim == 1:
-        isvec = True
+    if isvec := (filled_data.ndim == 1):
         filled_data = filled_data[:, None]
-    else:
-        isvec = False
 
-    nframes, nfeatures = filled_data.shape
+    _, nfeatures = filled_data.shape
 
     for idx in fill_idx[::-1]:
         if idx < len(missing_frames): # ensures ninserts value remains an int
@@ -300,7 +212,23 @@ def insert_nans(timestamps, data, fps=30):
     return filled_data, data_idx, filled_timestamps
 
 
-def read_yaml(yaml_file):
+def clean_paths(data: dict):
+    """
+    Convert paths to strings in a dictionary.
+    """
+    return {k: str(v) if isinstance(v, Path) else v for k, v in data.items()}
+
+
+def write_yaml(yaml_file: str | Path, data: dict):
+    """
+    Write dictionary to yaml file.
+    """
+    yaml = YAML(typ='safe')
+    with open(yaml_file, 'w') as f:
+        yaml.dump(clean_paths(data), f)
+
+
+def read_yaml(yaml_file: str | Path):
     """
     Read yaml file and return dictionary representation of file contents.
 
@@ -310,11 +238,13 @@ def read_yaml(yaml_file):
     Returns:
     return_dict (dict): dict of yaml file contents
     """
+    yaml = YAML(typ='safe')
 
     try:
         with open(yaml_file, 'r') as f:
-            return_dict = yaml.safe_load(f)
+            return_dict = yaml.load(f)
     except IOError:
+        click.echo(f'Error reading {yaml_file}. Returning empty dict.')
         return_dict = {}
 
     return return_dict
@@ -330,23 +260,27 @@ def check_timestamps(h5s):
     """
 
     for h5 in h5s:
+        missing_data = []
+        
         try:
-            h5_timestamp_path = get_timestamp_path(h5)
-        except:
-            warnings.warn(f'Autoload timestamps for session {h5} failed.')
-            h5_timestamp_path = None
-        try:
-            h5_metadata_path = get_metadata_path(h5)
-        except:
-            warnings.warn(f'Autoload metadata for session {h5} failed.')
-            h5_metadata_path = None
+            get_timestamp_path(h5)
+        except KeyError:
+            missing_data.append('timestamps')
+        except Exception as e:
+            warnings.warn(f'Error loading timestamps from {h5}: {str(e)}')
+            missing_data.append('timestamps')
 
-        if h5_timestamp_path is None:
-            warnings.warn(f'Could not located timestamps in {h5}. \
-                          This may cause issues if PCA has been trained on missing data.')
-        if h5_metadata_path is None:
-            warnings.warn(f'Could not located metadata in {h5}. \
-                          This may cause issues if PCA has been trained on missing data.')
+        try:
+            get_metadata_path(h5)
+        except KeyError:
+            missing_data.append('metadata')
+        except Exception as e:
+            warnings.warn(f'Error loading metadata from {h5}: {str(e)}')
+            missing_data.append('metadata')
+
+        if missing_data:
+            warnings.warn(f'Could not locate {", ".join(missing_data)} in {h5}. '
+                        'This may cause issues if PCA has been trained on missing data.')
 
 
 def get_timestamp_path(h5file):
@@ -389,12 +323,12 @@ def get_metadata_path(h5file):
             raise KeyError('acquisition metadata not found')
 
 
-def h5_to_dict(h5file, path):
+def h5_to_dict(h5file: str | Path | h5py.File, path: str) -> dict:
     """
     Read all contents from h5 and returns them in a nested dict object.
 
     Args:
-    h5file (str): path to h5 file
+    h5file (str | Path | h5py.File): path to h5 file
     path (str): path to group within h5 file
 
     Returns:
@@ -403,26 +337,32 @@ def h5_to_dict(h5file, path):
 
     ans = {}
 
-    if type(h5file) is str:
+    if isinstance(h5file, (str, Path)):
         with h5py.File(h5file, 'r') as f:
             ans = h5_to_dict(f, path)
-            return ans
+        return ans
+
+    if isinstance(h5file[path], h5py.Dataset):
+        return {path: h5file[path][()]}
 
     for key, item in h5file[path].items():
-        if isinstance(item, h5py._hl.dataset.Dataset):
+        if isinstance(item, h5py.Dataset):
             ans[key] = item[()]
-        elif isinstance(item, h5py._hl.group.Group):
+        elif isinstance(item, h5py.Group):
             ans[key] = h5_to_dict(h5file, path + key + '/')
     return ans
 
 
-def set_dask_config(memory={'target': 0.85, 'spill': False, 'pause': False, 'terminate': 0.95}):
+def set_dask_config(memory: dict = None):
     """
     Set initial dask configuration parameters
 
     Args:
     memory (dict): dictionary containing default dask configuration variables to ensure safe amount of resource usage.
     """
+
+    if memory is None:
+        memory = {'target': 0.85, 'spill': False, 'pause': False, 'terminate': 0.95}
 
     memory = {f'distributed.worker.memory.{k}': v for k, v in memory.items()}
     dask.config.set(memory)
@@ -438,9 +378,7 @@ def get_env_cpu_and_mem():
     cpu (int): Optimal number of CPUs to allocate to dask
     """
 
-    is_slurm = os.environ.get('SLURM_JOBID', False)
-
-    if is_slurm:
+    if is_slurm := os.environ.get('SLURM_JOBID', False):
         click.echo('Detected slurm environment, using "sacct" to detect cpu and memory requirements')
         cmd = f'sacct -j {is_slurm} --format AllocCPUS,ReqMem -X -n -p'
         output = subprocess.check_output(cmd.split(' '))
@@ -461,11 +399,47 @@ def get_env_cpu_and_mem():
     return mem, cpu
 
 
-def initialize_dask(nworkers=50, processes=1, memory='4GB', cores=1,
-                    wall_time='01:00:00', queue='debug', local_processes=False,
-                    cluster_type='local', timeout=10,
-                    cache_path=expanduser('~/moseq2_pca'),
-                    dashboard_port='8787', data_size=None, **kwargs):
+def calculate_worker_resources(dask_config: DaskConfig, data_size: float = None) -> tuple[int, float]:
+    """
+    Calculate optimal number of workers and memory limits for dask cluster.
+
+    Args:
+        dask_config (DaskConfig): Configuration object containing worker settings
+        data_size (float, optional): Size of dataset in bytes
+
+    Returns:
+        tuple: (nworkers, mem_limit) where nworkers is the number of workers to use
+               and mem_limit is the memory limit per worker in bytes
+    """
+    max_mem, max_cpu = get_env_cpu_and_mem()
+    overhead = 0.8e9  # memory overhead for each worker; approximate
+    
+    # allocating 0.4 of the maximum memory to account for overhead per worker
+    allowed = max_mem * 0.4 
+    max_workers = allowed // overhead
+
+    # set number of workers to maximum workers, or total number of CPUs
+    if dask_config.nworkers > max_workers:
+        click.echo(f'Reducing number of workers to {min(max_workers, max_cpu)} to account for worker base memory and the number of CPUs')
+    nworkers = int(min(max(1, dask_config.nworkers), max_workers, max_cpu))
+
+    # compute mem limit per worker
+    try:
+        mem_limit = max(1, max_mem / dask_config.nworkers)
+    except:
+        mem_limit = 1
+
+    # display some diagnostic info
+    if data_size is not None:
+        click.echo(f'Dataset size: {data_size / 1e9:.2f}GB')
+
+    click.echo(f'Setting number of workers to: {nworkers}')
+    click.echo(f'Overriding memory per worker to {mem_limit / 1e9:.2f}GB')
+
+    return nworkers, mem_limit
+
+
+def initialize_dask(dask_config: DaskConfig, data_size: float = None):
     """
     Initialize dask client, cluster, workers, etc.
 
@@ -490,54 +464,32 @@ def initialize_dask(nworkers=50, processes=1, memory='4GB', cores=1,
     workers (dask Workers): intialized workers
     """
 
-    click.echo(f'Access dask dashboard at http://localhost:{dashboard_port}')
+    click.echo(f'Access dask dashboard at http://localhost:{dask_config.dashboard_port}')
+    # dynamically change the set_dask_config memory setting
+    if dask_config.cluster_type == "local":
+        set_dask_config(memory={"target": 0.85, "spill": True, "pause": False, "terminate": False})
 
-    if cluster_type == 'local':
+        nworkers, mem_limit = calculate_worker_resources(dask_config, data_size)
 
-        max_mem, max_cpu = get_env_cpu_and_mem()
-        overhead = 0.8e9  # memory overhead for each worker; approximate
-        
-        # allocating 0.4 of the maximum memory to account for overhead per worker
-        allowed = max_mem * 0.4 
-        max_workers = allowed // overhead
-
-        # set number of workers to maximum workers, or total number of CPUs
-        if nworkers > max_workers:
-            click.echo(f'Reducing number of workers to {min(max_workers, max_cpu)} to account for worker base memory and the number of CPUs')
-        nworkers = int(min(max(1, nworkers), max_workers, max_cpu))
-
-        # compute mem limit per worker
-        try:
-            mem_limit = max(1, max_mem / nworkers)
-        except:
-            mem_limit = 1
-
-        # display some diagnostic info
-        if data_size is not None:
-            click.echo(f'Dataset size: {round(data_size / 1e9, 2)}GB')
-        click.echo(f'Setting number of workers to: {nworkers}')
-        click.echo(f'Overriding memory per worker to {round(mem_limit / 1e9, 2)}GB')
-
-        client = Client(processes=local_processes,
+        client = Client(processes=dask_config.local_processes,
                         threads_per_worker=1,
                         memory_limit=mem_limit,
                         n_workers=nworkers,
-                        dashboard_address=dashboard_port,
-                        local_directory=cache_path,
-                        **kwargs)
+                        dashboard_address=dask_config.dashboard_port,
+                        local_directory=str(dask_config.cache_path))
         cluster = client.cluster
 
-    elif cluster_type == 'slurm':
+    elif dask_config.cluster_type == 'slurm':
+        set_dask_config()
 
-        cluster = SLURMCluster(processes=processes,
-                               n_workers=nworkers,
-                               cores=cores,
-                               memory=memory,
-                               queue=queue,
-                               walltime=wall_time,
-                               local_directory=cache_path,
-                               scheduler_options={'dashboard_address': dashboard_port},
-                               **kwargs)
+        cluster = SLURMCluster(processes=dask_config.processes,
+                               n_workers=dask_config.nworkers,
+                               cores=dask_config.cores,
+                               memory=dask_config.memory,
+                               queue=dask_config.queue,
+                               walltime=dask_config.wall_time,
+                               local_directory=str(dask_config.cache_path),
+                               scheduler_options={'dashboard_address': dask_config.dashboard_port})
         client = Client(cluster)
     else:
         raise NotImplementedError('Specified cluster not supported. Supported types are: "slurm", "local"')
@@ -551,9 +503,8 @@ def initialize_dask(nworkers=50, processes=1, memory='4GB', cores=1,
             hostname = platform.node()
             click.echo(f'Web UI served at {ip}:{port} (if port forwarding use internal IP not localhost)')
             click.echo(f'Tunnel command:\n ssh -NL {port}:{ip}:{port} {hostname}')
-            click.echo(f'Tunnel command (gcloud):\n gcloud compute ssh {hostname} -- -NL {port}:{ip}:{port}')
 
-    if cluster_type == 'slurm':
+    if dask_config.cluster_type == 'slurm':
 
         active_workers = len(client.scheduler_info()['workers'])
         start_time = time.time()
@@ -561,15 +512,14 @@ def initialize_dask(nworkers=50, processes=1, memory='4GB', cores=1,
             warnings.simplefilter('ignore')
             pbar = tqdm(total=nworkers, desc="Intializing workers")
 
-            elapsed_time = (time.time() - start_time) / 60
-
-            while active_workers < nworkers and elapsed_time < timeout:
-                tmp = len(client.scheduler_info()['workers'])
+            while (
+                active_workers < nworkers and (time.time() - start_time) / 60 < dask_config.timeout
+            ):
+                tmp = len(client.scheduler_info()["workers"])
                 if tmp - active_workers > 0:
                     pbar.update(tmp - active_workers)
                 active_workers = tmp
                 time.sleep(1)
-                elapsed_time = (time.time() - start_time) / 60
 
             pbar.close()
 
@@ -599,7 +549,7 @@ def close_dask(client, cluster, timeout):
             print('Could not shutdown dask client')
 
 
-def get_rps(frames, rps: int= 600, normalize: bool = True):
+def get_rps(frames, rps: int = 600, normalize: bool = True):
     """
     Get random projections of frames.
 
@@ -624,7 +574,7 @@ def get_rps(frames, rps: int= 600, normalize: bool = True):
     return rproj
 
 
-def get_changepoints(scores, k=5, sigma=3, peak_height=.5, peak_neighbors=1,
+def get_changepoints(scores, changepoint_params: ChangepointParams,
                      baseline=True, timestamps=None):
     """
     Compute changepoints and its corresponding distribution. Changepoints describe
@@ -644,28 +594,28 @@ def get_changepoints(scores, k=5, sigma=3, peak_height=.5, peak_neighbors=1,
     normed_df (numpy.array): array of values for bar plot
     """
 
-    k = int(k)
-    peak_neighbors = int(peak_neighbors)
-
     nanidx = np.isnan(scores)
     smooth_scores = np.nan_to_num(scores)
 
-    if sigma is not None and sigma > 0:
-        smooth = partial(gauss_smooth, sig=sigma)
+    if changepoint_params.sigma is not None and changepoint_params.sigma > 0:
+        smooth = partial(gauss_smooth, sig=changepoint_params.sigma)
         smooth_scores = np.apply_along_axis(smooth, 1, smooth_scores)
 
-    smooth_scores[:, k // 2:-k // 2] = np.square(smooth_scores[:, k:] - smooth_scores[:, :-k])
+    smooth_scores[:, changepoint_params.klags // 2 : -changepoint_params.klags // 2] = np.square(
+        smooth_scores[:, changepoint_params.klags :] - smooth_scores[:, : -changepoint_params.klags]
+    )
     smooth_scores[nanidx] = np.nan
 
-    if sigma is not None and sigma > 0:
-        smooth_scores[:, :int(6 * sigma)] = np.nan
-        smooth_scores[:, -int(6 * sigma):] = np.nan
+    if changepoint_params.sigma is not None and changepoint_params.sigma > 0:
+        smooth_scores[:, :int(6 * changepoint_params.sigma)] = np.nan
+        smooth_scores[:, -int(6 * changepoint_params.sigma):] = np.nan
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         smooth_scores = np.nanmean(smooth_scores, axis=0)
 
-        if baseline: smooth_scores -= np.nanmin(smooth_scores)
+        if baseline:
+            smooth_scores -= np.nanmin(smooth_scores)
 
         if timestamps is not None:
             smooth_scores, _, _ = insert_nans(
@@ -673,8 +623,8 @@ def get_changepoints(scores, k=5, sigma=3, peak_height=.5, peak_neighbors=1,
 
         smooth_scores = np.squeeze(smooth_scores)
         cps = scipy.signal.argrelextrema(
-            smooth_scores, np.greater, order=peak_neighbors)[0]
-        cps = cps[np.argwhere(smooth_scores[cps] > peak_height)]
+            smooth_scores, np.greater, order=changepoint_params.neighbors)[0]
+        cps = cps[np.argwhere(smooth_scores[cps] > changepoint_params.threshold)]
 
     return cps, smooth_scores
 
@@ -688,11 +638,10 @@ def combine_new_config(config_file, config_data):
         config_data (dict): dictionary of config data
     """
     # open the config file
-    with open (config_file, 'r') as f:
-        temp_config = yaml.safe_load(f)
+    temp_config = read_yaml(config_file)
     # combining config data with the existing config file
-    config_data = {**temp_config, **config_data}
+    temp_config['pca'] = merge(temp_config['pca'], config_data)
     # ensure output_file and output_dir are not in config_data or reusing config for extraction will fail
-    config_data = {k:v for k, v in config_data.items() if k not in ('output_dir', 'output_file')}
-    with open(config_file, 'w') as f:
-        yaml.safe_dump(config_data, f)
+    temp_config['pca'] = dissoc(temp_config['pca'], 'output_dir', 'output_file')
+
+    write_yaml(config_file, temp_config)

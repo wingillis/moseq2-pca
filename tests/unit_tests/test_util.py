@@ -8,8 +8,9 @@ import ruamel.yaml as yaml
 from unittest import TestCase
 from dask.distributed import Client, LocalCluster
 from moseq2_pca.util import gaussian_kernel1d, gauss_smooth, read_yaml, insert_nans, \
-    check_timestamps, recursive_find_h5s, clean_frames, select_strel, \
+    check_timestamps, recursive_find_h5s, clean_frames, \
     get_timestamp_path, get_metadata_path, initialize_dask, get_rps, get_changepoints, h5_to_dict
+from moseq2_pca.helpers.parameters import MouseProcessingParams, DaskConfig
 
 
 class TestUtils(TestCase):
@@ -92,40 +93,25 @@ class TestUtils(TestCase):
 
         frames = np.tile(tmp_image, (nframes, 1, 1))
 
-        medfilter_space = [1, 1]
+        medfilter_space = (1, 1)
         gaussfilter_space = None
-        medfilter_time = [3]
-        gaussfilter_time = None
+        medfilter_time = (3,)
+        gaussfilter_time = 0
         detrend_time = 1
         tailfilter = None
 
-        test_output = clean_frames(frames, medfilter_space=medfilter_space, gaussfilter_space=gaussfilter_space,
-                     medfilter_time=medfilter_time, gaussfilter_time=gaussfilter_time, detrend_time=detrend_time,
-                     tailfilter=tailfilter, tail_threshold=5)
+        params = MouseProcessingParams(
+            medfilter_space=medfilter_space,
+            gaussfilter_space=gaussfilter_space,
+            medfilter_time=medfilter_time,
+            gaussfilter_time=gaussfilter_time,
+            tailfilter_size=(9, 9),
+        )
+        params.tailfilter = tailfilter
+
+        test_output = clean_frames(frames, mouse_proc_params=params, detrend_time=detrend_time)
 
         np.testing.assert_equal(np.any(np.not_equal(frames, test_output)), True)
-
-    def test_select_strel(self):
-        # original params: string='e', size=(10,10)
-        string0 = ''
-        string1 = 'e'
-        string2 = 'r'
-        size = (10, 10)
-        strel = None
-        mock_strel0 = None
-        mock_strel1 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, size)
-        mock_strel2 = cv2.getStructuringElement(cv2.MORPH_RECT, size)
-
-        test0 = select_strel(strel, size)
-        test01 = select_strel(string0, size)
-        test1 = select_strel(string1, size)
-        test2 = select_strel(string2, size)
-        test3 = select_strel('default', size)
-
-        assert test0 == test01 == mock_strel0
-        assert test1.all() == mock_strel1.all()
-        assert test2.all() == mock_strel2.all()
-        assert test3.all() == mock_strel1.all()
 
     def test_read_yaml(self):
         # original param: yaml_file
@@ -186,20 +172,18 @@ class TestUtils(TestCase):
     # TODO: possibly implement some kwargs edge cases
     def test_initialize_dask(self):
 
-        nworkers = 50
-        processes = 1
-        memory = '4GB'
-        cores = 1
-        wall_time = '01:00:00'
-        queue = 'debug'
-        cluster_type = 'local'
-        timeout = 10
-        cache_path = os.path.expanduser('~/moseq2_pca')
+        dask_config = DaskConfig(
+            nworkers=50,
+            processes=1,
+            memory='4GB',
+            cores=1,
+            wall_time='01:00:00',
+            queue='debug',
+            cluster_type='local',
+            timeout=10,
+        )
 
-        client, cluster, workers = initialize_dask(nworkers=nworkers, processes=processes, memory=memory,
-                                                   cores=cores, wall_time=wall_time, queue=queue,
-                                                   cluster_type=cluster_type,
-                                                   timeout=timeout, cache_path=cache_path)
+        client, cluster, workers = initialize_dask(dask_config)
 
         assert isinstance(client, Client)
         assert isinstance(cluster, LocalCluster)
