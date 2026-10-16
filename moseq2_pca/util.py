@@ -19,7 +19,6 @@ from copy import deepcopy
 from tqdm.auto import tqdm
 from ruamel.yaml import YAML
 from functools import partial
-from toolz import dissoc, merge
 from dask.distributed import Client
 from dask_jobqueue import SLURMCluster
 from moseq2_pca.helpers.parameters import MouseProcessingParams, DaskConfig, ChangepointParams
@@ -640,8 +639,63 @@ def combine_new_config(config_file, config_data):
     # open the config file
     temp_config = read_yaml(config_file)
     # combining config data with the existing config file
-    temp_config['pca'] = merge(temp_config['pca'], config_data)
+    config_data = {**temp_config, **config_data}
     # ensure output_file and output_dir are not in config_data or reusing config for extraction will fail
-    temp_config['pca'] = dissoc(temp_config['pca'], 'output_dir', 'output_file')
+    config_data = {
+        k: v for k, v in config_data.items() if k not in ("output_dir", "output_file")
+    }
 
-    write_yaml(config_file, temp_config)
+    write_yaml(config_file, config_data)
+
+
+def command_with_config(config_file_param_name):
+    """
+    Helper function to assign variables from a config file.
+    Hierarchy of CLI parameters: params from cli options > params from config_file > default params
+
+    Args:
+    config_file_param_name (str): parameter name to update with config file variable.
+
+    Returns:
+    custom_command_class (click.Command): updated Click Command containing
+    parameters from inputted config file.
+    """
+
+    class custom_command_class(click.Command):
+
+        def invoke(self, ctx):
+            config_file = ctx.params[config_file_param_name]
+            param_defaults = {}
+
+            # put default parameters in param_defaults dictionary
+            for param in self.params:
+                if type(param) is click.core.Option:
+                    param_defaults[param.human_readable_name] = param.default
+
+            if config_file is not None:
+                # read params from config_file
+                config_data = read_yaml(config_file)
+
+                # set config_data['output_file'] ['output_dir'] ['input_dir'] to
+                # None to avoid overwriting previous files
+                config_data["input_dir"] = None
+                config_data["output_dir"] = None
+                config_data["output_file"] = None
+
+                for param, value in ctx.params.items():
+                    # set params to the params in config file when the param is not none
+                    if param in config_data and config_data[param]:
+                        if type(value) is tuple and type(config_data[param]) is int:
+                            ctx.params[param] = tuple([config_data[param]])
+                        elif type(value) is tuple:
+                            ctx.params[param] = tuple(config_data[param])
+                        else:
+                            ctx.params[param] = config_data[param]
+
+                        # overwrite the parameter if users specify params with cli options
+                        if param_defaults[param] != value:
+                            ctx.params[param] = value
+
+            return super().invoke(ctx)
+
+    return custom_command_class

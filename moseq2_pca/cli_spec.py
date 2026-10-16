@@ -21,6 +21,10 @@ COMMON_PCA_OPTIONS = [
     (
         ['--chunk-size'],
         {'default': 4000, 'type': int, 'help': 'Number of frames per chunk'}
+    ),
+    (
+        ['--config-file'],
+        {'type': click.Path(), 'default': None, 'help': "Path to configuration file"}
     )
 ]
 

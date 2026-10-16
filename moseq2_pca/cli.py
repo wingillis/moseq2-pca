@@ -3,13 +3,12 @@ CLI for PCA and model-free changepoint analysis.
 """
 
 import click
-from moseq2_pca.util import combine_new_config, read_yaml
+from moseq2_pca.util import command_with_config, combine_new_config
 from moseq2_pca.helpers.wrappers import (train_pca_wrapper, apply_pca_wrapper,
                                          compute_changepoints_wrapper,
                                          clip_scores_wrapper)
-from moseq2_pca.cli_spec import (COMMON_PCA_OPTIONS, DASK_PARAMETERS, 
+from moseq2_pca.cli_spec import (COMMON_PCA_OPTIONS, DASK_PARAMETERS,
                                PCA_TRAIN_OPTIONS, option_spec)
-from pathlib import Path
 
 
 common_pca_options = option_spec(COMMON_PCA_OPTIONS)
@@ -17,89 +16,14 @@ common_dask_parameters = option_spec(DASK_PARAMETERS)
 common_pca_train_options = option_spec(PCA_TRAIN_OPTIONS)
 
 
-def load_config(ctx, param, value):
-    """Callback to load configuration from a YAML file and set defaults."""
-    if not value or not Path(value).exists():
-        return None  # No config file specified or found
-
-    try:
-        config = read_yaml(value)
-        # Extract the [pca] section if it exists
-        pca_config = config.get("pca", {})
-        if not isinstance(pca_config, dict):
-            raise click.BadParameter("Config [pca] section must be a dictionary.")
-
-        # Set the default map for the context if it doesn't exist
-        ctx.default_map = ctx.default_map or {}
-        # Add default map to each subcommand
-        _maps = {}
-        for command in ctx.command.commands.values():
-            _maps[command.name] = pca_config
-        ctx.default_map.update(_maps)
-
-    except Exception as e:
-        raise click.BadParameter(f"Error parsing config file {value}: {e}")
-
-    return value  # Return the path itself
-
-
-@click.group(context_settings=dict(show_default=True, default_map={}))
+@click.group(context_settings=dict(show_default=True))
 @click.version_option()
-@click.option(
-    "--config-file",
-    type=click.Path(dir_okay=False),
-    help="Path to a YAML configuration file. Options defined here are overridden by CLI arguments.",
-    callback=load_config,
-    is_eager=True,
-)
-@click.pass_context
-def cli(ctx, config_file):
+def cli():
     """MoSeq2 PCA: PCA and model-free changepoint analysis."""
-    ctx.ensure_object(dict).update({"config_path": config_file})
+    pass
 
-@cli.command(
-    name="generate-config",
-    help="Generates a configuration file (config.yaml) that holds editable options for pca parameters.",
-)
-@click.option("--output-file", "-o", type=click.Path(), default="pca-config.yaml")
-@click.option(
-    "--camera-type",
-    default="k2",
-    type=click.Choice(["k2", "azure"]),
-    help="specify the camera type (k2 or azure), default is k2",
-)
-def generate_config(output_file, camera_type):
-    """Copy default config and patch selected fields via sed to keep comments/structure."""
-    import shutil
 
-    script_path = Path(__file__).parent
-    default_path = script_path / "default-config.yaml"
-    shutil.copy(default_path, output_file)
-
-    if camera_type == "azure":
-        replacements = [
-            ("gaussfilter_space", "[2.25, 1.5]"),
-            ("tail_filter_size", "[15, 15]"),
-            ("camera_type", '"azure"'),
-        ]
-
-        with open(output_file, "r") as f:
-            lines = f.readlines()
-
-        new_lines = []
-        for line in lines:
-            for key, val in replacements:
-                if key in line:
-                    line = f"  {key}: {val}\n"
-                    break
-            new_lines.append(line)
-
-        with open(output_file, "w") as f:
-            f.writelines(new_lines)
-
-    print(f"Successfully generated config file at {output_file}.")
-
-@cli.command(name='train-pca', help='Train PCA on all extracted results (h5 files) in input directory')
+@cli.command(name='train-pca', cls=command_with_config('config_file'), help='Train PCA on all extracted results (h5 files) in input directory')
 @common_pca_options
 @common_dask_parameters
 @common_pca_train_options
@@ -117,10 +41,14 @@ def train_pca(input_dir, output_dir, output_file, **cli_args):
         if cli_args['tailfilter_size'] == (9, 9):
             cli_args['tailfilter_size'] = (15, 15)
 
-    train_pca_wrapper(input_dir, cli_args, output_dir, output_file)
-    
+    config_data = train_pca_wrapper(input_dir, cli_args, output_dir, output_file)
+    # write config_data to config_file if there is one
+    if cli_args.get('config_file'):
+        # combine new config with old config to add output pca path to config.yaml
+        combine_new_config(cli_args.get('config_file'), config_data)
 
-@cli.command(name='apply-pca', help='Compute PCA Scores of extraction data given a pre-trained PCA')
+
+@cli.command(name='apply-pca', cls=command_with_config('config_file'), help='Compute PCA Scores of extraction data given a pre-trained PCA')
 @common_pca_options
 @common_dask_parameters
 @click.option('--output-file', default='pca_scores', type=str, help='Name of h5 file for storing pca results')
@@ -132,10 +60,14 @@ def train_pca(input_dir, output_dir, output_file, **cli_args):
 @click.option('--overwrite-pca-apply', default=False, type=bool, help='Used to bypass the pca overwrite question. If True: skip question, run automatically')
 def apply_pca(input_dir, output_dir, output_file, **cli_args):
     # function writes output pc score path to config_data
-    apply_pca_wrapper(input_dir, cli_args, output_dir, output_file)
+    config_data = apply_pca_wrapper(input_dir, cli_args, output_dir, output_file)
+    # write config_data to config_file if there is one
+    if cli_args.get('config_file'):
+        # combine new config with old config to add output pc score path to config.yaml
+        combine_new_config(cli_args.get('config_file'), config_data)
         
 
-@cli.command('compute-changepoints', help='Compute the Model-Free Syllable Changepoints based on the PCA/PCA_Scores')
+@cli.command('compute-changepoints', cls=command_with_config('config_file'), help='Compute the Model-Free Syllable Changepoints based on the PCA/PCA_Scores')
 @common_pca_options
 @common_dask_parameters
 @click.option('--output-file', default='changepoints', type=str, help='Name of h5 file for storing pca results')
@@ -150,7 +82,11 @@ def apply_pca(input_dir, output_dir, output_file, **cli_args):
 @click.option('--fps', default=30, type=int, help="Frames per second (frame rate)")
 def compute_changepoints(input_dir, output_dir, output_file, **cli_args):
     # function writes output changepoint path to config_data
-    compute_changepoints_wrapper(input_dir, cli_args, output_dir, output_file)
+    config_data = compute_changepoints_wrapper(input_dir, cli_args, output_dir, output_file)
+    # write config_data to config_file if there is one
+    if cli_args.get('config_file'):
+        # combine new config with old config to add output changepoint path to config.yaml
+        combine_new_config(cli_args.get('config_file'), config_data)
 
 
 @cli.command('clip-scores', help='Clip specified number of frames from PCA scores at the beginning or end')
