@@ -12,6 +12,13 @@ from pathlib import Path
 from tqdm.auto import tqdm
 import dask.array.linalg as lng
 from dask.distributed import as_completed, progress
+from moseq2_pca.helpers.parameters import (
+    MouseProcessingParams,
+    SVDConfig,
+    DaskConfig,
+    ChangepointParams,
+    MaskParams,
+)
 from moseq2_pca.util import (
     clean_frames,
     insert_nans,
@@ -19,6 +26,13 @@ from moseq2_pca.util import (
     get_changepoints,
     get_rps,
 )
+
+
+def _coerce_mask_params(mask_params):
+    """Accept either a MaskParams dataclass or an equivalent dict."""
+    if isinstance(mask_params, dict):
+        return MaskParams(**mask_params)
+    return mask_params
 
 
 def mask_data(original_data, mask, new_data):
@@ -41,17 +55,50 @@ def mask_data(original_data, mask, new_data):
     return output
 
 
+def _scaled_svd_compressed(dask_array, mean, svd_config):
+    """
+    Run dask's randomized svd_compressed on the centered data with an exact
+    power-of-two rescaling and n_power_iter power iterations.
+
+    Power iterations dramatically improve the accuracy and run-to-run
+    reproducibility of the randomized SVD, but dask's 'power' iterator does
+    not re-orthonormalize between iterations, so intermediate values grow by
+    ~sigma**2 per iteration and can overflow float32 on production-size
+    corpora. Dividing by a power of two is exact in floating point (only the
+    exponent changes), so components are unaffected and the singular values
+    are simply rescaled back afterwards.
+
+    Returns (u, s, v) in the ORIGINAL (unscaled) units.
+    """
+    centered = dask_array - mean
+
+    max_abs = da.abs(centered).max()
+    scale = float(da.compute(max_abs)[0])
+    if scale > 0 and np.isfinite(scale):
+        scale = 2.0 ** np.ceil(np.log2(scale))
+    else:
+        scale = 1.0
+
+    u, s, v = lng.svd_compressed(
+        centered / scale,
+        k=svd_config.rank,
+        n_power_iter=svd_config.n_power_iter,
+        compute=svd_config.memory_efficient,
+    )
+    # u (left singular vectors) is unitary and needs no rescaling; only the
+    # singular values carry the scale, so u @ diag(s) @ v reconstructs the
+    # original centered matrix.
+    return u, s * scale, v
+
+
 def compute_svd(
-    dask_array,
-    mean,
-    rank,
-    iters,
-    missing_data,
-    mask,
-    recon_pcs,
-    min_height,
-    max_height,
-    client,
+    dask_array: da.Array,
+    mean: np.ndarray,
+    mask: da.Array,
+    svd_config: SVDConfig,
+    min_height: int,
+    max_height: int,
+    client: dask.distributed.Client,
 ):
     """
     Runs Singular Vector Decomposition on the inputted frames. If missing_data == True, use missing data PCA.
@@ -59,11 +106,8 @@ def compute_svd(
     Args:
     dask_array (dask 2d-array): Reshaped input data array of shape (nframes x nfeatures)
     mean (numpy.array): Means of each row in dask_array.
-    rank (int): Rank of the desired thin SVD decomposition.
-    iters (int): Number of SVD iterations
-    missing_data (bool): Indicates whether to compute SVD with a masked array
     mask (dask 2d-array): None if missing_data == False, else mask array of shape dask_array
-    recon_pcs (int): Number of PCs to reconstruct for missing data.
+    svd_config (SVDConfig): Configuration for SVD.
     min_height (int): Minimum height of mouse above the ground, used to filter reconstructed PCs.
     max_height (int): Maximum height of mouse above the ground, used to filter reconstructed PCs.
     client (dask Client): Dask client to process batches.
@@ -75,23 +119,18 @@ def compute_svd(
     total_var (float): total variance captured by principal components.
     """
 
-    if not missing_data:
+    if not svd_config.missing_data:
         # Compute PCs
-        _, s, v = lng.svd_compressed(dask_array - mean, rank, 0, compute=True)
+        _, s, v = _scaled_svd_compressed(dask_array, mean, svd_config)
     else:
-        for iter in tqdm(range(iters), total=iters, desc="Computing Iterative PCA"):
-            u, s, v = lng.svd_compressed(dask_array - mean, rank, 0, compute=True)
-            if iter < iters - 1:
-                recon = (
-                    u[:, :recon_pcs].dot(da.diag(s[:recon_pcs]).dot(v[:recon_pcs, :]))
-                    + mean
-                )
-                recon[recon < min_height] = 0
-                recon[recon > max_height] = 0
-                dask_array = da.map_blocks(
-                    mask_data, dask_array, mask, recon, dtype=dask_array.dtype
-                )
-                mean = dask_array.mean(axis=0)
+        dask_array, mean, s, v = compute_iterative_svd(
+            dask_array=dask_array,
+            mean=mean,
+            mask=mask,
+            svd_config=svd_config,
+            min_height=min_height,
+            max_height=max_height
+        )
 
     # Compute total variance
     total_var = dask_array.var(ddof=1, axis=0).sum()
@@ -102,6 +141,45 @@ def compute_svd(
 
     s, v, mean, total_var = client.gather(futures)
     return s, v, mean, total_var
+
+
+def compute_iterative_svd(dask_array, mean, mask, svd_config, min_height, max_height):
+    """
+    Performs iterative SVD for missing data PCA.
+
+    Args:
+    dask_array (dask 2d-array): Reshaped input data array of shape (nframes x nfeatures)
+    mean (numpy.array): Means of each row in dask_array.
+    mask (dask 2d-array): Mask array of shape dask_array
+    svd_config (SVDConfig): Configuration for SVD.
+    min_height (int): Minimum height of mouse above the ground, used to filter reconstructed PCs.
+    max_height (int): Maximum height of mouse above the ground, used to filter reconstructed PCs.
+
+    Returns:
+    dask_array (dask 2d-array): Updated dask array after iterations
+    mean (numpy.array): Updated mean after iterations
+    s (numpy.array): Final computed singular values
+    v (numpy.ndarray): Final computed principal components
+    """
+    for iter in tqdm(
+        range(svd_config.iters), total=svd_config.iters, desc="Computing Iterative PCA"
+    ):
+        u, s, v = _scaled_svd_compressed(dask_array, mean, svd_config)
+        if iter < svd_config.iters - 1:
+            recon = (
+                u[:, : svd_config.recon_pcs]
+                @ (da.diag(s[: svd_config.recon_pcs]) @ v[: svd_config.recon_pcs, :])
+                + mean
+            )
+            recon = da.where(
+                da.logical_or(recon < min_height, recon > max_height),
+                0,
+                recon,
+            )
+            dask_array = da.map_blocks(mask_data, dask_array, mask, recon, dtype=dask_array.dtype)
+            mean = dask_array.mean(axis=0)
+
+    return dask_array, mean, s, v
 
 
 def compute_explained_variance(s, nsamples, total_var):
@@ -124,13 +202,12 @@ def compute_explained_variance(s, nsamples, total_var):
     return explained_variance, explained_variance_ratio
 
 
-def get_timestamps(f: h5py.File, frames, fps=30):
+def get_timestamps(f: h5py.File, fps=30):
     """
     Read the timestamps from a given h5 file.
 
     Args:
     f (read-open h5py File): open "results_00.h5" h5py.File object in read-mode
-    frames (numpy.ndarray): list of 2d frames contained in opened h5 File.
     fps (int): frames per second.
 
     Returns:
@@ -147,19 +224,19 @@ def get_timestamps(f: h5py.File, frames, fps=30):
         print(
             "WARNING: timestamps were not found. Using default frame series-ordering."
         )
-        timestamps = np.arange(frames.shape[0]) / fps
+        timestamps = np.arange(len(f["frames"])) / fps
 
     return timestamps
 
 
-def copy_metadatas_to_scores(f, f_scores, uuid):
+def copy_metadatas_to_scores(f: h5py.File, f_scores: h5py.File, uuid: str):
     """
     Copy metadata from individual session extract h5 files to the PCA scores h5 file.
 
     Args:
-    f (read-open h5py File): open "results_00.h5" h5py.File object in read-mode
-    f_scores (read-open h5py File): open "pca_scores.h5" h5py.File object in read-mode
-    uuid (str): uuid of inputted session h5 "f".
+    f (h5py.File): open "results_00.h5" h5py.File object in read-mode
+    f_scores (h5py.File): open "pca_scores.h5" h5py.File object in write-mode
+    uuid (str): uuid of "f"
     """
 
     if "/metadata/acquisition" in f:
@@ -173,39 +250,27 @@ def copy_metadatas_to_scores(f, f_scores, uuid):
 
 
 def train_pca_dask(
-    dask_array,
-    clean_params,
-    use_fft,
-    rank,
-    cluster_type,
-    client,
-    mask=None,
-    iters=10,
-    recon_pcs=10,
-    min_height=10,
-    max_height=100,
+    dask_array: da.Array,
+    mouse_proc_params: MouseProcessingParams,
+    svd_config: SVDConfig,
+    dask_config: DaskConfig,
+    client: dask.distributed.Client,
+    mask: da.Array = None,
 ):
     """
     Train PCA using dask arrays.
 
     Args:
     dask_array (dask array): chunked frames to train PCA
-    clean_params (dict): dictionary containing filtering parameters
-    use_fft (bool): indicates whether to use 2d-FFT on images.
-    rank (int): Matrix rank to use
-    cluster_type (str): indicates which cluster to use.
+    mouse_proc_params (MouseProcessingParams): dictionary containing filtering parameters
+    svd_config (SVDConfig): configuration for SVD
+    dask_config (DaskConfig): configuration for Dask
     client (Dask.Client): client object to execute dask operations
     mask (dask array): dask array of masked data if missing_data parameter==True
-    iters (int): number of SVD iterations
-    recon_pcs (int): number of PCs to reconstruct. (if missing_data = True)
-    min_height (int): minimum mouse height from floor in (mm)
-    max_height (int): maximum mouse height from floor in (mm)
 
     Returns:
     output_dict (dict): dictionary containing PCA training results.
     """
-
-    missing_data = False
 
     # Get smallest chunk
     smallest_chunk = np.min(dask_array.chunks[0])
@@ -213,39 +278,31 @@ def train_pca_dask(
     # Apply the mask if it was provided via missing_data == True
     if mask is not None:
         click.echo("Found mask, applying to training data")
-        missing_data = True
+        svd_config.missing_data = True
         dask_array[mask] = 0
         mask = mask.reshape(len(mask), -1)
 
     # Apply filters
-    if clean_params["gaussfilter_time"] > 0 or np.any(
-        np.array(clean_params["medfilter_time"]) > 0
+    if mouse_proc_params.gaussfilter_time > 0 or np.any(
+        np.array(mouse_proc_params.medfilter_time) > 0
     ):
         dask_array = dask_array.map_overlap(
             clean_frames,
             depth=(np.minimum(smallest_chunk, 20), 0, 0),
             boundary="reflect",
             dtype="float32",
-            **clean_params,
+            mouse_proc_params=mouse_proc_params,
         )
     else:
         dask_array = dask_array.map_blocks(
-            clean_frames, dtype="float32", **clean_params
-        )
-
-    # Optionally apply FFT to training data
-    if use_fft:
-        print("Using FFT...")
-        dask_array = dask_array.map_blocks(
-            lambda x: np.fft.fftshift(np.abs(np.fft.fft2(x)), axes=(1, 2)),
-            dtype="float32",
+            clean_frames, dtype="float32", mouse_proc_params=mouse_proc_params
         )
 
     # Reshape the data to 2D matrix
     dask_array = dask_array.reshape(len(dask_array), -1).astype("float32")
 
-    if cluster_type == "slurm":
-        print("Cleaning frames...")
+    if dask_config.cluster_type == "slurm":
+        click.echo("Cleaning frames...")
         dask_array = client.persist(dask_array)
         if mask is not None:
             mask = client.persist(mask)
@@ -253,35 +310,28 @@ def train_pca_dask(
     # Compute mean to subtract from data later
     mean = dask_array.mean(axis=0)
 
-    if cluster_type == "slurm":
+    if dask_config.cluster_type == "slurm":
         mean = client.persist(mean)
 
-    # todo compute reconstruction error
-
-    print("\nComputing SVD...")
-
-    # Pack the PCA training parameters
-    svd_training_parameters = {
-        "dask_array": dask_array,
-        "mask": mask,
-        "mean": mean,
-        "rank": rank,
-        "iters": iters,
-        "missing_data": missing_data,
-        "recon_pcs": recon_pcs,
-        "min_height": min_height,
-        "max_height": max_height,
-    }
+    click.echo("\nComputing SVD...")
 
     # Train the PCA
-    s, v, mean, total_var = compute_svd(**svd_training_parameters, client=client)
+    s, v, mean, total_var = compute_svd(
+        dask_array=dask_array,
+        mean=mean,
+        mask=mask,
+        svd_config=svd_config,
+        min_height=mouse_proc_params.min_height,
+        max_height=mouse_proc_params.max_height,
+        client=client,
+    )
 
-    print("\nCalculation complete...")
+    click.echo("\nCalculation complete")
 
     # correct the sign of the singular vectors
-    tmp = np.argmax(np.abs(v), axis=1)
-    correction = np.sign(v[np.arange(len(v)), tmp])
-    v *= correction[:, None]
+    index = np.argmax(np.abs(v), axis=1)
+    correction = np.sign(v[np.arange(len(v)), index])
+    v = v * correction[:, None]
 
     # Get explained variances
     explained_variance, explained_variance_ratio = compute_explained_variance(
@@ -300,148 +350,34 @@ def train_pca_dask(
     return output_dict
 
 
-def apply_pca_local(
-    pca_components,
-    h5s,
-    yamls,
-    use_fft,
-    clean_params,
-    save_file,
-    chunk_size,
-    mask_params,
-    missing_data,
-    fps=30,
-    h5_path="/frames",
-    h5_mask_path="/frames_mask",
-    verbose=False,
-):
-    """
-    Project the input frame data by the transpose of the given PCs to obtain PCA Scores
-    using local cluster/platform.
-
-    Args:
-    pca_components (numpy.array): array of computed Principal Components
-    h5s (list): list of h5 files
-    yamls (list): list of yaml files
-    use_fft (bool): indicate whether to use 2D-FFT
-    clean_params (dict): dictionary containing filtering options
-    save_file (str): path to pca_scores filename to save
-    chunk_size (int): size of chunks to process
-    mask_params (dict): dictionary of masking parameters (if missing data)
-    missing_data (bool): indicates whether to use mask arrays.
-    fps (int): frames per second
-    h5_path (str): path to frames within selected h5 file (default: '/frames')
-    h5_mask_path (str): path to masked frames within selected h5 file (default: '/frames_mask')
-    verbose (bool): print session names as they are being loaded.
-
-    Returns:
-    """
-
-    with h5py.File(f"{save_file}.h5", "w") as f_scores:
-        for h5, yml in tqdm(zip(h5s, yamls), total=len(h5s), desc="Computing scores"):
-            if verbose:
-                print("Loading", h5)
-
-            with h5py.File(h5, "r") as f:
-                # associate UUID with frames
-                try:
-                    uuid = f["metadata/uuid"][()]
-                    if isinstance(uuid, bytes):
-                        uuid = uuid.decode()
-                except Exception:
-                    uuid = read_yaml(yml)["uuid"]
-
-                # Load frames
-                frames = f[h5_path][()].astype("float32")
-
-                if missing_data:
-                    # Load masked frames
-                    mask = f[h5_mask_path][()]
-                    mask = np.logical_and(
-                        mask < mask_params["mask_threshold"],
-                        frames > mask_params["mask_height_threshold"],
-                    )
-                    frames[mask] = 0
-                    mask = mask.reshape(-1, frames.shape[1] * frames.shape[2])
-
-                # Filter the data
-                frames = clean_frames(frames, **clean_params)
-
-                # Apply FFT
-                if use_fft:
-                    frames = np.fft.fftshift(np.abs(np.fft.fft2(frames)), axes=(1, 2))
-
-                # Reshape the data to 2D matrix
-                frames = frames.reshape(-1, frames.shape[1] * frames.shape[2])
-
-                timestamps = get_timestamps(f, frames, fps)
-                copy_metadatas_to_scores(f, f_scores, uuid)
-
-            # Compute scores
-            scores = frames.dot(pca_components.T)
-
-            # if we have missing data, simply fill in, repeat the score calculation,
-            # then move on
-            if missing_data:
-                # Compute reconstructed PCs
-                recon = scores.dot(pca_components)
-                recon[recon < mask_params["min_height"]] = 0
-                recon[recon > mask_params["max_height"]] = 0
-                frames[mask] = recon[mask]
-                scores = frames.dot(pca_components.T)
-
-            # Insert NaNs into scores array
-            scores, score_idx, _ = insert_nans(
-                data=scores,
-                timestamps=timestamps,
-                fps=np.round(1 / np.mean(np.diff(timestamps))).astype("int"),
-            )
-
-            # Write scores
-            f_scores.create_dataset(
-                f"scores/{uuid}", data=scores, dtype="float32", compression="gzip"
-            )
-            f_scores.create_dataset(
-                f"scores_idx/{uuid}",
-                data=score_idx,
-                dtype="float32",
-                compression="gzip",
-            )
-
-
 def apply_pca_dask(
     pca_components,
     h5s,
     yamls,
-    use_fft,
-    clean_params,
-    save_file,
-    chunk_size,
-    mask_params,
-    missing_data,
-    client,
-    fps=30,
-    h5_path="/frames",
-    h5_mask_path="/frames_mask",
-    verbose=False,
+    mouse_proc_params: MouseProcessingParams,
+    save_file: Path,
+    mask_params: dict,
+    svd_config: SVDConfig,
+    client: dask.distributed.Client,
+    fps: int = 30,
+    h5_path: str = "/frames",
+    h5_mask_path: str = "/frames_mask",
 ):
     """
     Project input frame data by the transpose of the given PCs to obtain PCA Scores using distributed Dask cluster.
 
     Args:
-    pca_components (numpy.array): array of computed Principal Components
+    pca_components (numpy.ndarray): array of computed Principal Components
     h5s (list): list of h5 files
     yamls (list): list of yaml files
-    use_fft (bool): indicate whether to use 2D-FFT
-    clean_params (dict): dictionary containing filtering options
-    save_file (str): path to pca_scores filename to save
-    chunk_size (int): size of chunks to process
+    mouse_proc_params (MouseProcessingParams): dictionary containing filtering options
+    save_file (Path): path to pca_scores filename to save
     mask_params (dict): dictionary of masking parameters (if missing data)
-    missing_data (bool): indicates whether to use mask arrays.
+    svd_config (SVDConfig): configuration for running SVD with Dask
+    client (dask Client): initialized Dask Client object
     fps (int): frames per second
     h5_path (str): path to frames within selected h5 file (default: '/frames')
     h5_mask_path (str): path to masked frames within selected h5 file (default: '/frames_mask')
-    verbose (bool): print session names as they are being loaded.
 
     Returns:
     """
@@ -449,10 +385,9 @@ def apply_pca_dask(
     futures = []
     uuids = []
     h5_file_pointers = []
+    mask_params = _coerce_mask_params(mask_params)
 
     for h5, yml in tqdm(zip(h5s, yamls), total=len(h5s), desc="Loading Data"):
-        if verbose:
-            print("Loading", h5)
 
         h5p = h5py.File(h5, mode="r")
 
@@ -465,51 +400,47 @@ def apply_pca_dask(
             uuid = read_yaml(yml)["uuid"]
 
         # Load data
-        frames = da.from_array(h5p[h5_path], chunks=chunk_size).astype("float32")
+        frames = da.from_array(h5p[h5_path], chunks=svd_config.chunk_size).astype("float32")
 
-        if missing_data:
+        if svd_config.missing_data:
             # Load masked data
             mask = da.from_array(h5p[h5_mask_path], chunks=frames.chunks)
             mask = da.logical_and(
-                mask < mask_params["mask_threshold"],
-                frames > mask_params["mask_height_threshold"],
+                mask < mask_params.mask_threshold,
+                frames > mask_params.mask_height_threshold,
             )
-            frames[mask] = 0
+            frames = da.where(mask, 0, frames)
             mask = mask.reshape(-1, frames.shape[1] * frames.shape[2])
 
         # Apply filters
-        if clean_params["gaussfilter_time"] > 0 or np.any(
-            np.array(clean_params["medfilter_time"]) > 0
+        if mouse_proc_params.gaussfilter_time > 0 or np.any(
+            np.array(mouse_proc_params.medfilter_time) > 0
         ):
             frames = frames.map_overlap(
                 clean_frames,
                 depth=(20, 0, 0),
                 boundary="reflect",
                 dtype="float32",
-                **clean_params,
+                mouse_proc_params=mouse_proc_params,
             )
         else:
-            frames = frames.map_blocks(clean_frames, dtype="float32", **clean_params)
-
-        # Apply FFT
-        if use_fft:
-            frames = frames.map_blocks(
-                lambda x: np.fft.fftshift(np.abs(np.fft.fft2(x)), axes=(1, 2)),
-                dtype="float32",
-            )
+            frames = frames.map_blocks(clean_frames, dtype="float32", mouse_proc_params=mouse_proc_params)
 
         # Reshape data to 2D and compute scores
         frames = frames.reshape(-1, frames.shape[1] * frames.shape[2])
-        scores = frames.dot(pca_components.T)
+        scores = frames @ pca_components.T
 
-        if missing_data:
+        if svd_config.missing_data:
             # Reconstruct missing scores data
-            recon = scores.dot(pca_components)
-            recon[recon < mask_params["min_height"]] = 0
-            recon[recon > mask_params["max_height"]] = 0
+            recon = scores @ pca_components
+            recon = da.where(
+                da.logical_or(recon < mouse_proc_params.min_height, recon > mouse_proc_params.max_height),
+                0,
+                recon,
+            )
             frames = da.map_blocks(mask_data, frames, mask, recon, dtype=frames.dtype)
             # Compute reconstructed scores
-            scores = frames.dot(pca_components.T)
+            scores = frames @ pca_components.T
 
         futures.append(scores)
         uuids.append(uuid)
@@ -518,7 +449,7 @@ def apply_pca_dask(
     # pin the batch size to the number of workers (assume each worker has enough RAM for one session)
     batch_size = len(client.scheduler_info()["workers"])
 
-    with h5py.File(f"{save_file}.h5", "w") as f_scores:
+    with h5py.File(save_file, "w") as f_scores:
 
         batch_count = 0
         batches = range(0, len(futures), batch_size)
@@ -536,7 +467,7 @@ def apply_pca_dask(
 
                 with h5py.File(h5s_batch[file_idx], mode="r") as f:
                     # Load timestamps
-                    timestamps = get_timestamps(f, frames, fps)
+                    timestamps = get_timestamps(f, fps)
                     copy_metadatas_to_scores(f, f_scores, uuids_batch[file_idx])
 
                 # Insert NaNs in missing frames in scores array
@@ -565,7 +496,7 @@ def apply_pca_dask(
 
 
 def get_changepoints_dask(
-    changepoint_params,
+    changepoint_params: ChangepointParams,
     pca_components,
     h5s,
     yamls,
@@ -579,14 +510,13 @@ def get_changepoints_dask(
     progress_bar=False,
     h5_path="/frames",
     h5_mask_path="/frames_mask",
-    verbose=False,
     n_rps=300,
 ):
     """
     Compute model-free changepoint block durations using random projections.
 
     Args:
-    changepoint_params (dict): dict of changepoint parameters
+    changepoint_params (ChangepointParams): dict of changepoint parameters
     pca_components (numpy.array): computed principal components
     h5s (list): list of h5 files
     yamls (list): list of yaml files
@@ -600,7 +530,6 @@ def get_changepoints_dask(
     progress_bar (bool): display progress bar
     h5_path (str): path to frames within selected h5 file (default: '/frames')
     h5_mask_path (str): path to masked frames within selected h5 file (default: '/frames_mask')
-    verbose (bool): print session names as they are being loaded.
 
     Returns:
     """
@@ -608,6 +537,7 @@ def get_changepoints_dask(
     futures = []
     uuids = []
     h5_file_pointers = []
+    mask_params = _coerce_mask_params(mask_params)
 
     for h5, yml in tqdm(
         zip(h5s, yamls),
@@ -615,8 +545,6 @@ def get_changepoints_dask(
         desc="Setting up calculation",
         total=len(h5s),
     ):
-        if verbose:
-            print("Loading", h5)
 
         h5p = h5py.File(h5, "r")
 
@@ -632,7 +560,7 @@ def get_changepoints_dask(
         frames = da.from_array(h5p[h5_path], chunks=chunk_size).astype("float32")
 
         # Load timestamps
-        timestamps = get_timestamps(h5p, frames, fps)
+        timestamps = get_timestamps(h5p, fps)
 
         if missing_data and pca_scores is None:
             raise RuntimeError("Need to compute PC scores to impute missing data")
@@ -640,8 +568,8 @@ def get_changepoints_dask(
             # Load masked data
             mask = da.from_array(h5p[h5_mask_path], chunks=frames.chunks)
             mask = da.logical_and(
-                mask < mask_params["mask_threshold"],
-                frames > mask_params["mask_height_threshold"],
+                mask < mask_params.mask_threshold,
+                frames > mask_params.mask_height_threshold,
             )
             frames[mask] = 0
 
@@ -673,7 +601,7 @@ def get_changepoints_dask(
 
         # Compute changepoints delayed job
         cps = dask.delayed(get_changepoints, pure=True)(
-            rps, timestamps=timestamps, **changepoint_params
+            rps, timestamps=timestamps, changepoint_params=changepoint_params
         )
 
         futures.append(cps)
